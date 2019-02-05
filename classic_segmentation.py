@@ -15,6 +15,10 @@ class ClassicSegmentation:
             min_area = 3
             max_area = 50
             """
+        self.cut_left = kwargs.get('cut_left', 5)
+        self.cut_right = kwargs.get('cut_right', 95)
+        self.cut_top = kwargs.get('cut_top', 5)
+        self.cut_bottom = kwargs.get('cut_bottom', 95)
         self.image = cv2.imread(str(kwargs['filename']))
         self.mask = None
         self.denoise_size = kwargs.get('denoise', 3)
@@ -35,10 +39,10 @@ class ClassicSegmentation:
 
     def _cut_image(self, cut_left, cut_right, cut_top, cut_bottom):
         h, w = self.image.shape[:2]
-        w_left = int(w * cut_left / 100)
-        w_right = int(w * cut_right / 100)
-        h_top = int(h * cut_top / 100)
-        h_bottom = int(h * cut_bottom / 100)
+        w_left = int(w * self.cut_left / 100)
+        w_right = int(w * self.cut_right / 100)
+        h_top = int(h * self.cut_top / 100)
+        h_bottom = int(h * self.cut_bottom / 100)
         self.image = self.image[h_top:h_bottom, w_left:w_right, :]
 
     def _floodfill(self):
@@ -108,17 +112,4 @@ class ClassicSegmentation:
         return self.individual_images
 
 
-
-
-
-
-
-
-
-mask = ClassicSegmentation(filename="Scan/albicocche1.tif")
-mask.get_mask()
-for i, m in zip(mask.small_masks, mask.small_images):
-    cv2.imshow("mask", m)
-    cv2.imshow("img", i)
-    cv2.waitKey(0)
-    cv2.destroyAllWindows()
+mask = ClassicSegmentation(filename="Dataset/Albicocca  /albicocche1.tif")
