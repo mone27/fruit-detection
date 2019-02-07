@@ -7,7 +7,7 @@ import numpy as np
 class ClassicSegmentation:
     """A class for image segmentation usage:"""
 
-    def __init__(self, **kwargs):
+    def __init__(self,filename, **kwargs):
         """parameter:
             filename (must be specified) path to the image file
             threshold = 100
@@ -19,7 +19,7 @@ class ClassicSegmentation:
         self.cut_right = kwargs.get('cut_right', 95)
         self.cut_top = kwargs.get('cut_top', 5)
         self.cut_bottom = kwargs.get('cut_bottom', 95)
-        self.image = cv2.imread(str(kwargs['filename']))
+        self.image = cv2.imread(str(filename))
         self.mask = None
         self.denoise_size = kwargs.get('denoise', 3)
         self.threshold = kwargs.get('threshold', 100)
@@ -30,6 +30,8 @@ class ClassicSegmentation:
         self.individual_masks = []
         self.individual_images = []
         # can call get_mask() here...
+        self._cut_image()
+        
 
     def get_mask(self):
         self.mask = cv2.cvtColor(self.image, cv2.COLOR_BGR2GRAY)
@@ -37,7 +39,7 @@ class ClassicSegmentation:
         self._floodfill()._denoise()
         self._clean_mask()
 
-    def _cut_image(self, cut_left, cut_right, cut_top, cut_bottom):
+    def _cut_image(self):
         h, w = self.image.shape[:2]
         w_left = int(w * self.cut_left / 100)
         w_right = int(w * self.cut_right / 100)
@@ -98,8 +100,8 @@ class ClassicSegmentation:
             x, y, w, h = cv2.boundingRect(contour)
             image_section = self.image[y:y + h, x:x + w]
             mask_section = self.mask[y:y + h, x:x + w]
-            self.individual_masks.append(image_section)
-            self.individual_images.append(mask_section)
+            self.individual_masks.append(mask_section)
+            self.individual_images.append(image_section)
 
     @property
     def small_masks(self):
@@ -112,4 +114,4 @@ class ClassicSegmentation:
         return self.individual_images
 
 
-mask = ClassicSegmentation(filename="Dataset/Albicocca  /albicocche1.tif")
+
