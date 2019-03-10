@@ -31,13 +31,15 @@ class ClassicSegmentation:
         self.individual_images = []
         # can call get_mask() here...
         self._cut_image()
-        
+        self.get_mask()
 
     def get_mask(self):
         self.mask = cv2.cvtColor(self.image, cv2.COLOR_BGR2GRAY)
         _, self.mask = cv2.threshold(self.mask, self.threshold, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
         self._floodfill()._denoise()
         self._clean_mask()
+    
+    
 
     def _cut_image(self):
         h, w = self.image.shape[:2]
@@ -87,7 +89,7 @@ class ClassicSegmentation:
 
     def _clean_image(self):
         self.image = self.image & \
-                np.   stack([self.mask, self.mask, self.mask], axis=2) #to make background perfectly black
+                np.stack([self.mask, self.mask, self.mask], axis=2) #to make background perfectly black
 
     def _calculate_individual_masks(self):
         if self.individual_masks:  # skip if already executed
