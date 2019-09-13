@@ -1,5 +1,5 @@
- # docker file from https://github.com/anibali/docker-pytorch
-# installs fastai with all required deps +  opencv
+# docker file from https://github.com/anibali/docker-pytorch
+# installs fastai with all required deps +  opencv + jupyterlab (with git extensions) + plotly express
 FROM nvidia/cuda:10.0-base-ubuntu18.04
 
 # Install some basic utilities
@@ -10,25 +10,15 @@ RUN apt-get update && apt-get install -y \
     git \
     bzip2 \
     libx11-6 \
-    acl\
+    build-essential\
  && rm -rf /var/lib/apt/lists/*
 
-# Create a working directory
-RUN mkdir /app
-WORKDIR /app
 
 # Create a non-root user and switch to it
-RUN adduser --disabled-password --gecos '' --shell /bin/bash user \
- && chown -R user:user /app
+RUN adduser --disabled-password --gecos '' --shell /bin/bash user
 RUN echo "user ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/90-user
 #to allow install in /opt
 RUN chmod 777 /opt
-#default permissions for files created in /opt
-RUN setfacl -R -d -m o:rwx /opt
-USER user
-
-
-
 
 # All users can use /home/user as their home directory
 ENV HOME=/home/user
@@ -53,7 +43,7 @@ ENV CONDA_DEFAULT_ENV=fastai
 ENV CONDA_PREFIX=/opt/miniconda/envs/$CONDA_DEFAULT_ENV
 ENV PATH=$CONDA_PREFIX/bin:$PATH
 
-# CUDA 10.0-specific steps
+#install pytorch with  CUDA 10.0
 RUN conda install -y -c  pytorch\
 	torchvision cudatoolkit=10.0\
  && conda clean -ya
@@ -68,24 +58,36 @@ RUN conda install -c fastai fastai\
 	&& conda clean -a
 
 
-
 # Install OpenCV3 Python bindings
 RUN sudo apt-get update && sudo apt-get install -y --no-install-recommends \
     libgtk2.0-0 \
     libcanberra-gtk-module \
  && sudo rm -rf /var/lib/apt/lists/*
-#RUN conda install -y -c conda-forge opencv=3.4.4 \
- #&& conda clean -ya
+RUN conda install -y -c conda-forge opencv=3.4.4 \
+ && conda clean -ya
 
 #install jupyter lab
 RUN conda install -c conda-forge jupyterlab 
 
-#install jupyterlab-git
-RUN conda install -c conda-forge jupyterlab-git \
+#install node js for jupyterlab extensions
+RUN conda install -c conda-forge nodejs\
 	&& conda clean -ya
-RUN ls -l /opt && ls -l /opt/miniconda
 
+#install plolty
+#RUN conda install -c plotly plotly_express\
+#	&& conda clean -ya\
+#	&& jupyter labextension install @jupyterlab/plotly-extension --no-build\
+#	&& jupyter labextension install jupyterlab-chart-editor --no-build
+
+#install jupyterlab-git
+RUN jupyter labextension install @jupyterlab/git --no-build\
+	&& pip install jupyterlab-git\
+	&& jupyter serverextension enable --py jupyterlab_git
+#install ipywidgets becuause it get not installed by fasti: TODO look at this issue
+RUN conda install ipywidgets\
+	&& conda clean -ya
+#rebuild jupyterlab for new installed extensions
 RUN jupyter lab build
 
 # Set the default command to jupyter
-ENTRYPOINT jupyter lab --ip=0.0.0.0 --no-browser
+CMD jupyter lab --ip=0.0.0.0 --no-browser
