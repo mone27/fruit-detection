@@ -43,46 +43,16 @@ ENV CONDA_DEFAULT_ENV=fastai
 ENV CONDA_PREFIX=/opt/miniconda/envs/$CONDA_DEFAULT_ENV
 ENV PATH=$CONDA_PREFIX/bin:$PATH
 
-#install pytorch with  CUDA 10.0
+#install pytorch with  CUDA 10.0 and fastai
 RUN conda install -y -c  pytorch\
 	torchvision cudatoolkit=10.0\
+ && conda install -y -c fastai fastai\
+ && conda clean -ya
+
+# Install ipykernel
+RUN conda install -y ipykernel \
  && conda clean -ya
 
 
-# Install Requests, a Python library for making HTTP requests
-RUN conda install -y requests \
- && conda clean -ya
-
-## Install OpenCV3 Python bindings
-#RUN sudo apt-get update && sudo apt-get install -y --no-install-recommends \
-#    libgtk2.0-0 \
-#    libcanberra-gtk-module \
-# && sudo rm -rf /var/lib/apt/lists/*
-#RUN conda install -y -c conda-forge opencv=3.4.4 \
-# && conda clean -ya
-
-#install jupyter lab
-RUN conda install -c conda-forge jupyterlab 
-
-##install node js for jupyterlab extensions
-#RUN conda install -c conda-forge nodejs\
-#	&& conda clean -ya
-#
-##install jupyterlab-git
-#RUN jupyter labextension install @jupyterlab/git --no-build\
-#	&& pip install jupyterlab-git\
-#	&& jupyter serverextension enable --py jupyterlab_git
-
-#install fastai
-RUN conda install -y -c fastai  fastai\
-	&& conda clean -ya
-
-#install ipywidgets becuause it get not installed by fasti: TODO look at this issue
-RUN conda install ipywidgets\
-	&& conda clean -ya
-	
-#rebuild jupyterlab for new installed extensions
-#RUN jupyter lab build
-
-# Set the default command to jupyter
-CMD jupyter lab --ip=0.0.0.0 --no-browser
+# Run ipython kernel accessible with ssh after copying kernel info https://github.com/ipython/ipython/wiki/Cookbook:-Connecting-to-a-remote-kernel-via-ssh
+CMD ipython kernel
