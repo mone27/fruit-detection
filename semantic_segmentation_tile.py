@@ -3,7 +3,7 @@ from collections import namedtuple
 from functools import lru_cache
 from fastai.vision import *
 
-# not so nice hardcoded costant
+# not so nice hardcoded constant
 CACHE_MAX_SIZE = 20
 
 
@@ -18,15 +18,16 @@ def open_mask_cached(*args, **kwargs): return open_mask(*args, **kwargs)
 def open_image_tile(img_t: ImageTile, mask=False, **kwargs) -> Image:
     """given and ImageTile it returns and Image with the tile,
     set mask to True for masks, indexes ... TODO"""
-#     print(f"opening image Tile {img_t}, mask: {mask}")
     path, idx, rows, cols = img_t
-    img = open_image_cached(path ,**kwargs) if not mask else open_mask_cached(path, **kwargs)
+    img = open_image_cached(path, **kwargs) if not mask else open_mask_cached(path, **kwargs)
 
     row = idx // cols
     col = idx % cols
     tile_x = img.size[1] // cols
     tile_y = img.size[0] // rows
-    return Image(img.data[:,  row * tile_y:(row + 1) * tile_y , col * tile_x:(col + 1) * tile_x])
+    img_cls = Image if not mask else ImageSegment  # needed because masks has a different class
+    ret_img = img_cls(img.px[:, row * tile_y:(row + 1) * tile_y, col * tile_x:(col + 1) * tile_x])
+    return ret_img
 
 def get_tiles(images: PathOrStr, rows: int, cols: int) -> Collection[ImageTile]:
     images_tiles = []
@@ -222,7 +223,8 @@ class SemanticSegmentationTile:
         fig, ax = plt.subplots(figsize=figsize)
         ax.imshow(img)
 
-# %% testssss
+
+# %% tests
 
 if __name__=='__main__':
     trs = get_transforms()
@@ -234,17 +236,23 @@ if __name__=='__main__':
         path = get_maskp(path)
         return ImageTile(path, *tile)
 
+
     src = (SegmentationTileItemList
-                .from_folder("dataset_segmentation/images", 2,2)
-                .split_none()
-                .label_from_func(get_mask_tiles, classes=['background', 'fruit']))
+           .from_folder("dataset_segmentation/images", 1, 1)
+           .split_none()
+           .label_from_func(get_mask_tiles, classes=['background', 'fruit']))
 
+    # src2 = (SegmentationItemList.from_folder("dataset_segmentation/images")
+    #         .split_none()
+    #         .label_from_func(get_maskp, classes=['background', 'fruit']))
+    #
+    # data2 = (src2.transform(trs, tfm_y=True)
+    #         .databunch(bs=1)
+    #         .normalize(imagenet_stats))
 
-    src2 = (SegmentationItemList.from_folder("dataset_segmentation/images")
-            .split_none()
-            .label_from_func(get_maskp, classes=['background', 'fruit']))
-
-    data=        (src.transform(trs, tfm_y=True)
-                .databunch(bs=1)
-                .normalize(imagenet_stats))
-    # seg = SemanticSegmentationTile(Path("dataset_segmentation/images"), Path("dataset_segmentation/labels"), transforms=trs)
+    # learn = unet_learner(data2, models.resnet34)
+    data = (src.transform(trs, tfm_y=True)
+            .databunch(bs=1)
+            .normalize(imagenet_stats))
+    seg = SemanticSegmentationTile(Path("dataset_segmentation/images"), Path("dataset_segmentation/labels"),
+                                   transforms=trs)
