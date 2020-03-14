@@ -79,7 +79,7 @@ class SemanticSegmentationTile:
         # need to get 1 image find the size and call calc_n_tile        
         self.img_size = open_image(get_files(path_imgs, None, recurse=True)[0]).size
 
-        (self.cols, self.x_tile, self.x_diff), (self.rows, self.y_tile, self.y_diff) \
+        (self.rows, self.y_tile, self.y_diff), (self.cols, self.x_tile, self.x_diff) \
             = SemanticSegmentationTile.calc_n_tiles(self.img_size, max_tile_size, max_tol)
         # Maybe need to use Logger instead of print
         print(f"Creating Dataset of images of total size: ({self.img_size[0]}, {self.img_size[1]});"
@@ -137,17 +137,18 @@ class SemanticSegmentationTile:
         y = SemanticSegmentationTile.best_block_divide(y, tile_max_size, max_tol)
         return y, x
 
-    #TODO refactor to use new image notation
     def predict_mask(self, img_path):
         # init mask, note mask is the to 0 because it is bigger than the sum of all tiles
         mask = torch.zeros(1, self.img_size[0], self.img_size[1], dtype=torch.int64)
-
+        # Maybe need to use pred_batch for better performance
         for row, col in product(range(self.rows), range(self.cols)):
-            tile_idx = row * self.rows + col  # get the index of the tile
+            tile_idx = row * self.cols + col  # get the index of the tile
             img_tile = open_image_tile(ImageTile(img_path, idx=tile_idx, rows=self.rows, cols=self.cols))
+            print(f"predicting: {ImageTile(img_path, idx=tile_idx, rows=self.rows, cols=self.cols)}")
             mask_tile, _, _ = self.learn.predict(img_tile)
 
             mask[:, self.y_tile * row:self.y_tile * (row + 1), self.x_tile * col:self.x_tile * (col + 1)] = mask_tile.data
+            print("done")
         return ImageSegment(mask)
 
     def seg_test_image_tile(self, img: ImageTile, real_mask: ImageTile):
@@ -225,3 +226,7 @@ if __name__ == '__main__':
                                     max_tile_size=256, model=models.resnet18)
 
     segm.learn = segm.learn.load("resnet18_4_epoch_freezed_1e-4_bg_0000")
+    print("predicting mask")
+    # mask1 = segm.learn.predict(open_image("dataset_segmentation/images/albicocche1.png"))
+    mask = segm.predict_mask("dataset_segmentation/images/albicocche1.png")
+    mask.show()
