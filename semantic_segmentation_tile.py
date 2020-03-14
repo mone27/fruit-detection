@@ -144,11 +144,9 @@ class SemanticSegmentationTile:
         for row, col in product(range(self.rows), range(self.cols)):
             tile_idx = row * self.cols + col  # get the index of the tile
             img_tile = open_image_tile(ImageTile(img_path, idx=tile_idx, rows=self.rows, cols=self.cols))
-            print(f"predicting: {ImageTile(img_path, idx=tile_idx, rows=self.rows, cols=self.cols)}")
             mask_tile, _, _ = self.learn.predict(img_tile)
 
             mask[:, self.y_tile * row:self.y_tile * (row + 1), self.x_tile * col:self.x_tile * (col + 1)] = mask_tile.data
-            print("done")
         return ImageSegment(mask)
 
     def seg_test_image_tile(self, img: ImageTile, real_mask: ImageTile):
