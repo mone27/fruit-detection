@@ -79,7 +79,7 @@ class SemanticSegmentationTile:
         # need to get 1 image find the size and call calc_n_tile        
         self.img_size = open_image(get_files(path_imgs, None, recurse=True)[0]).size
 
-        (self.rows, self.x_tile, self.x_diff), (self.cols, self.y_tile, self.y_diff) \
+        (self.cols, self.x_tile, self.x_diff), (self.rows, self.y_tile, self.y_diff) \
             = SemanticSegmentationTile.calc_n_tiles(self.img_size, max_tile_size, max_tol)
         # Maybe need to use Logger instead of print
         print(f"Creating Dataset of images of total size: ({self.img_size[0]}, {self.img_size[1]});"
@@ -132,10 +132,10 @@ class SemanticSegmentationTile:
     def calc_n_tiles(size, tile_max_size, max_tol=30):
         """returns the \"best\" size for the tile given the image size.
         return type is a tuple of (n_blocks, block_size, n_elem_left)"""
-        x, y = size
+        y, x = size
         x = SemanticSegmentationTile.best_block_divide(x, tile_max_size, max_tol)
         y = SemanticSegmentationTile.best_block_divide(y, tile_max_size, max_tol)
-        return x, y
+        return y, x
 
     #TODO refactor to use new image notation
     def predict_mask(self, img_path):
@@ -220,33 +220,8 @@ class SemanticSegmentationTile:
 
 # %% tests
 
-if __name__=='__main__':
-    trs = get_transforms()
-    def get_maskp(path):
-        return Path("dataset_segmentation/labels") / path.name
+if __name__ == '__main__':
+    segm = SemanticSegmentationTile(Path("dataset_segmentation/images"), Path("dataset_segmentation/labels"),
+                                    max_tile_size=256, model=models.resnet18)
 
-    def get_mask_tiles(image_tile: ImageTile):
-        path, *tile = image_tile
-        path = get_maskp(path)
-        return ImageTile(path, *tile)
-
-
-    src = (SegmentationTileItemList
-           .from_folder("dataset_segmentation/images", 1, 1)
-           .split_none()
-           .label_from_func(get_mask_tiles, classes=['background', 'fruit']))
-
-    # src2 = (SegmentationItemList.from_folder("dataset_segmentation/images")
-    #         .split_none()
-    #         .label_from_func(get_maskp, classes=['background', 'fruit']))
-    #
-    # data2 = (src2.transform(trs, tfm_y=True)
-    #         .databunch(bs=1)
-    #         .normalize(imagenet_stats))
-
-    # learn = unet_learner(data2, models.resnet34)
-    data = (src.transform(trs, tfm_y=True)
-            .databunch(bs=1)
-            .normalize(imagenet_stats))
-    seg = SemanticSegmentationTile(Path("dataset_segmentation/images"), Path("dataset_segmentation/labels"),
-                                   transforms=trs)
+    segm.learn = segm.learn.load("resnet18_4_epoch_freezed_1e-4_bg_0000")
