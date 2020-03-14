@@ -1,6 +1,7 @@
 from pathlib import Path
 from collections import namedtuple
 from functools import lru_cache
+from itertools import product
 from fastai.vision import *
 
 # not so nice hardcoded constant
@@ -26,6 +27,7 @@ def open_image_tile(img_t: ImageTile, mask=False, **kwargs) -> Image:
     tile_x = img.size[1] // cols
     tile_y = img.size[0] // rows
     img_cls = Image if not mask else ImageSegment  # needed because masks has a different class
+    # need to use .px instead of .data because ImageSegment convert data to int64
     ret_img = img_cls(img.px[:, row * tile_y:(row + 1) * tile_y, col * tile_x:(col + 1) * tile_x])
     return ret_img
 
@@ -67,7 +69,7 @@ class SemanticSegmentationTile:
 
     codes = ['background', 'fruit']
 
-    def __init__(self, path_imgs: Path, path_masks: Path, max_tile_size=512, bs=16, max_tol=30, transforms=get_transforms()):
+    def __init__(self, path_imgs: Path, path_masks: Path, max_tile_size=512, bs=16, max_tol=30, transforms=get_transforms(), model=models.resnet34):
         """
         images and masks must be all of the same size!
         """
@@ -75,12 +77,12 @@ class SemanticSegmentationTile:
         self.path_msks = path_masks
         
         # need to get 1 image find the size and call calc_n_tile        
-        img_size = open_image(get_files(path_imgs, None, recurse=True)[0]).size
-        
-        (self.rows, self.x_tile, self.x_diff), (self.cols, self.y_tile, self.y_diff)\
-            = SemanticSegmentationTile.calc_n_tiles(img_size, max_tile_size, max_tol)
+        self.img_size = open_image(get_files(path_imgs, None, recurse=True)[0]).size
+
+        (self.rows, self.x_tile, self.x_diff), (self.cols, self.y_tile, self.y_diff) \
+            = SemanticSegmentationTile.calc_n_tiles(self.img_size, max_tile_size, max_tol)
         # Maybe need to use Logger instead of print
-        print(f"Creating Dataset of images of total size: ({img_size[0]}, {img_size[1]});"
+        print(f"Creating Dataset of images of total size: ({self.img_size[0]}, {self.img_size[1]});"
               f"\nnumber of rows: {self.rows}, columns: {self.cols};"
               f"\nsize of tiles: ({self.y_tile}, {self.x_tile});"
               f"\ndiscared pixels due to rounding y: {self.y_diff} x: {self.x_diff}")
@@ -93,7 +95,7 @@ class SemanticSegmentationTile:
                 .normalize(imagenet_stats)) # needed because it use pretrained resnet on ImageNet
         print(f"created Dataset with in: {len(self.data.train_ds)} tiles train and {len(self.data.valid_ds)} in valid",
              "\ncreating learner ...")
-        self.learn = unet_learner(self.data, models.resnet34, metrics=seg_accuracy)
+        self.learn = unet_learner(self.data, model, metrics=seg_accuracy)
         print("done")
         
 
@@ -137,24 +139,16 @@ class SemanticSegmentationTile:
 
     #TODO refactor to use new image notation
     def predict_mask(self, img_path):
-        # uses all the global variables that are output of calc_n_tiles(), maybe refactor
-        i = 0
-        end_mask = None  # sentinel value for first iteration
-        for col in range(cols):
-            col_mask = None
-            for row in range(rows):
-                img_tile = open_image_tile(ImageTile(img_path, idx=i, rows=rows, cols=cols))
-                mask_tile, _, _ = inf_learn.predict(img_tile)
-                mask_tile = mask_tile.data.permute(1, 2,
-                                                   0)  # convert to numpy style it is the way to think about the image
-                col_mask = np.vstack((col_mask, mask_tile)) if col_mask is not None else mask_tile
-                i += 1
-            end_mask = np.hstack((end_mask, col_mask)) if end_mask is not None else col_mask
-        # add padding to make pred_mask size the same of the original image
-        pred_mask = torch.zeros((*img_size, 1), dtype=torch.long)  # iniziatlize mask with correct size with all black
-        pred_mask[:-x_diff, :-y_diff, :] = torch.tensor(end_mask).permute(1, 0,
-                                                                          2)  # copy mask on the all black background
-        return Image(pred_mask.permute(2, 1, 0))  # convert back to pytorch image style
+        # init mask, note mask is the to 0 because it is bigger than the sum of all tiles
+        mask = torch.zeros(1, self.img_size[0], self.img_size[1], dtype=torch.int64)
+
+        for row, col in product(range(self.rows), range(self.cols)):
+            tile_idx = row * self.rows + col  # get the index of the tile
+            img_tile = open_image_tile(ImageTile(img_path, idx=tile_idx, rows=self.rows, cols=self.cols))
+            mask_tile, _, _ = self.learn.predict(img_tile)
+
+            mask[:, self.y_tile * row:self.y_tile * (row + 1), self.x_tile * col:self.x_tile * (col + 1)] = mask_tile.data
+        return ImageSegment(mask)
 
     def seg_test_image_tile(self, img: ImageTile, real_mask: ImageTile):
         pred_mask, _, _ = inf_learn.predict(open_image_tile(img))
