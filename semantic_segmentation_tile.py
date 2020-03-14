@@ -4,7 +4,6 @@ from functools import lru_cache
 from itertools import product
 from fastai.vision import *
 
-
 # not so nice hardcoded constant
 CACHE_MAX_SIZE = 20
 
@@ -28,6 +27,7 @@ def open_image_tile(img_t: ImageTile, mask=False, **kwargs) -> Image:
     tile_x = img.size[1] // cols
     tile_y = img.size[0] // rows
     img_cls = Image if not mask else ImageSegment  # needed because masks has a different class
+    # need to use .px instead of .data because ImageSegment convert data to int64
     ret_img = img_cls(img.px[:, row * tile_y:(row + 1) * tile_y, col * tile_x:(col + 1) * tile_x])
     return ret_img
 
@@ -69,7 +69,7 @@ class SemanticSegmentationTile:
 
     codes = ['background', 'fruit']
 
-    def __init__(self, path_imgs: Path, path_masks: Path, max_tile_size=512, bs=16, max_tol=30, transforms=get_transforms()):
+    def __init__(self, path_imgs: Path, path_masks: Path, max_tile_size=512, bs=16, max_tol=30, transforms=get_transforms(), model=models.resnet34):
         """
         images and masks must be all of the same size!
         """
@@ -95,7 +95,7 @@ class SemanticSegmentationTile:
                 .normalize(imagenet_stats)) # needed because it use pretrained resnet on ImageNet
         print(f"created Dataset with in: {len(self.data.train_ds)} tiles train and {len(self.data.valid_ds)} in valid",
              "\ncreating learner ...")
-        self.learn = unet_learner(self.data, models.resnet34, metrics=seg_accuracy)
+        self.learn = unet_learner(self.data, model, metrics=seg_accuracy)
         print("done")
         
 
@@ -137,6 +137,7 @@ class SemanticSegmentationTile:
         y = SemanticSegmentationTile.best_block_divide(y, tile_max_size, max_tol)
         return x, y
 
+    #TODO refactor to use new image notation
     def predict_mask(self, img_path):
         # init mask, note mask is the to 0 because it is bigger than the sum of all tiles
         mask = torch.zeros(1, self.img_size[0], self.img_size[1], dtype=torch.int64)
@@ -146,26 +147,8 @@ class SemanticSegmentationTile:
             img_tile = open_image_tile(ImageTile(img_path, idx=tile_idx, rows=self.rows, cols=self.cols))
             mask_tile, _, _ = self.learn.predict(img_tile)
 
-            mask[:, self.y_tile * row:self.y_tile * (row + 1), self.x_tile * col:self.x_tile * (col + 1)] = mask_tile
+            mask[:, self.y_tile * row:self.y_tile * (row + 1), self.x_tile * col:self.x_tile * (col + 1)] = mask_tile.data
         return ImageSegment(mask)
-        # # uses all the global variables that are output of calc_n_tiles(), maybe refactor
-        # i = 0
-        # end_mask = None  # sentinel value for first iteration
-        # for col in range(cols):
-        #     col_mask = None
-        #     for row in range(rows):
-        #         img_tile = open_image_tile(ImageTile(img_path, idx=i, rows=rows, cols=cols))
-        #         mask_tile, _, _ = inf_learn.predict(img_tile)
-        #         mask_tile = mask_tile.data.permute(1, 2,
-        #                                            0)  # convert to numpy style it is the way to think about the image
-        #         col_mask = np.vstack((col_mask, mask_tile)) if col_mask is not None else mask_tile
-        #         i += 1
-        #     end_mask = np.hstack((end_mask, col_mask)) if end_mask is not None else col_mask
-        # # add padding to make pred_mask size the same of the original image
-        # pred_mask = torch.zeros((*img_size, 1), dtype=torch.long)  # iniziatlize mask with correct size with all black
-        # pred_mask[:-x_diff, :-y_diff, :] = torch.tensor(end_mask).permute(1, 0,
-        #                                                                   2)  # copy mask on the all black background
-        # return Image(pred_mask.permute(2, 1, 0))  # convert back to pytorch image style
 
     def seg_test_image_tile(self, img: ImageTile, real_mask: ImageTile):
         pred_mask, _, _ = inf_learn.predict(open_image_tile(img))
