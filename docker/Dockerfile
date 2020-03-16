@@ -33,7 +33,6 @@ RUN curl -so /opt/miniconda.sh https://repo.anaconda.com/miniconda/Miniconda3-la
  && /opt/miniconda.sh -b -p /opt/miniconda \
  && rm /opt/miniconda.sh
 ENV PATH=/opt/miniconda/bin:$PATH
-ENV CONDA_AUTO_UPDATE_CONDA=false
 
 # Create a Python  environment
 RUN /opt/miniconda/bin/conda install conda-build \
@@ -43,38 +42,25 @@ ENV CONDA_DEFAULT_ENV=fastai
 ENV CONDA_PREFIX=/opt/miniconda/envs/$CONDA_DEFAULT_ENV
 ENV PATH=$CONDA_PREFIX/bin:$PATH
 
-#install pytorch with  CUDA 10.0
+#install pytorch with  CUDA 10.1
 RUN conda install -y -c  pytorch\
-	torchvision cudatoolkit=10.0\
+	torchvision cudatoolkit=10.1\
  && conda clean -ya
 
-# # Install Requests, a Python library for making HTTP requests
-# RUN conda install -y requests \
-#  && conda clean -ya
 
-## Install OpenCV3 Python bindings
-#RUN sudo apt-get update && sudo apt-get install -y --no-install-recommends \
-#    libgtk2.0-0 \
-#    libcanberra-gtk-module \
-# && sudo rm -rf /var/lib/apt/lists/*
-#install from conda-forge: opencv jupyterlab and nodejs
-RUN conda install -y -c conda-forge opencv jupyterlab nodejs \
+#install from conda-forge: opencv, jupyterlab, nodejs an matplotlib widgets
+RUN conda install -y -c conda-forge opencv jupyterlab nodejs ipympl \
 && conda clean -ya
 
-# #install jupyter lab
-# RUN conda install -c conda-forge jupyterlab 
-
-# ##install node js for jupyterlab extensions
-# RUN conda install -c conda-forge nodejs\
-# 	&& conda clean -ya
-# #
-# #install jupyterlab-git
+RUN jupyter labextension install @jupyter-widgets/jupyterlab-manager\
+    && jupyter labextension install jupyter-matplotlib
+    
 RUN jupyter labextension install @jupyterlab/git --no-build\
 	&& pip install jupyterlab-git\
 	&& jupyter serverextension enable --py jupyterlab_git
 
 #install fastai
-RUN conda install -y -c fastai  fastai\
+RUN conda install -y -c fastai fastai\
 	&& conda clean -ya
 
 #install ipywidgets becuause it get not installed by fastai: TODO look at this issue
@@ -83,7 +69,7 @@ RUN conda install ipywidgets\
 	
 # rebuild jupyterlab for new installed extensions
 RUN jupyter lab build
-# enable end user to modify conda installation
-RUN chmod 777 /opt 
+# enable container user to modify conda installation
+#RUN chmod -R 777 /opt 
 # Set the default command to jupyter
 CMD jupyter lab --ip=0.0.0.0 --no-browser
