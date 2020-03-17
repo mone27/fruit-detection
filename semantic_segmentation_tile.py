@@ -69,7 +69,7 @@ def open_image_tile(img_t: ImageTile, **kwargs) -> Image:
 def open_mask_tile(mask_t: ImageMaskTile, **kwargs):
     path, idx, rows, cols = mask_t
     img = open_mask_cached(path, **kwargs)
-    return get_image_tile(img, idx, rows, cols)
+    return ImageSegment(get_image_tile(img, idx, rows, cols).px)
 
 
 def get_tiles(images, rows: int, cols: int) -> Collection[ImageTile]:
