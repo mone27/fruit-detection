@@ -9,8 +9,8 @@ from math import ceil
 CACHE_MAX_SIZE = 40
 
 # looks like a non consistent API to have mask in ImageTile
-ImageTile = namedtuple('ImageTile', 'path idx rows cols custom_bg mask')
-ImageMaskTile = namedtuple('ImageMaskTile', 'path idx cols rows')
+ImageTile = namedtuple('ImageTile', 'path idx rows cols scale custom_bg mask')
+ImageMaskTile = namedtuple('ImageMaskTile', 'path idx cols scale rows')
 
 
 class CustomBackground:
@@ -22,10 +22,10 @@ class CustomBackground:
     def apply(self, img: Image, mask: ImageSegment) -> Image:
         """replaces the background in"""
         mask = mask.data.type(torch.ByteTensor)
-        new_bg = self.repeat_bg_tfms(img.size)
+        new_bg = self._repeat_bg_tfms(img.size)
         return Image(torch.where(mask, img.data, new_bg.data))
 
-    def repeat_bg_tfms(self, size: Tuple[int, int]) -> Image:
+    def _repeat_bg_tfms(self, size: Tuple[int, int]) -> TensorImage:
         y, x = size
         bg_z, bg_y, bg_x = self.bg.shape
         nx = ceil(x / bg_x)
@@ -37,11 +37,15 @@ class CustomBackground:
 
 
 @lru_cache(maxsize=CACHE_MAX_SIZE)
-def open_image_cached(*args, **kwargs): return open_image(*args, **kwargs)
+def open_image_cached(*args, scale=1, **kwargs):
+    img = open_image(*args, **kwargs)
+    return img.resize((1, img.size[0] // scale, img.size[1] // scale)).refresh()
 
 
 @lru_cache(maxsize=CACHE_MAX_SIZE)
-def open_mask_cached(*args, **kwargs): return open_mask(*args, **kwargs)
+def open_mask_cached(*args, scale=1, **kwargs):
+    mask = open_mask(*args, **kwargs)
+    return mask.resize((1, mask.size[0] // scale, mask.size[1] // scale)).refresh()
 
 
 def get_image_tile(img: Image, idx, rows, cols) -> Image:
@@ -56,8 +60,8 @@ def get_image_tile(img: Image, idx, rows, cols) -> Image:
 def open_image_tile(img_t: ImageTile, **kwargs) -> Image:
     """given and ImageTile it returns and Image with the tile,
     set mask to True for masks"""
-    path, idx, rows, cols, bg, mask_t = img_t
-    img = open_image_cached(path, **kwargs)
+    path, idx, rows, cols, scale, bg, mask_t = img_t
+    img = open_image_cached(path, scale=scale, **kwargs)
     img = get_image_tile(img, idx, rows, cols)
 
     if bg:
@@ -67,16 +71,16 @@ def open_image_tile(img_t: ImageTile, **kwargs) -> Image:
 
 
 def open_mask_tile(mask_t: ImageMaskTile, **kwargs):
-    path, idx, rows, cols = mask_t
-    img = open_mask_cached(path, **kwargs)
+    path, idx, rows, cols, scale = mask_t
+    img = open_mask_cached(path, scale=scale, **kwargs)
     return ImageSegment(get_image_tile(img, idx, rows, cols).px)
 
 
-def get_tiles(images, rows: int, cols: int) -> Collection[ImageTile]:
+def get_tiles(images, rows: int, cols: int, scale: int) -> Collection[ImageTile]:
     images_tiles = []
     for img in images:
         for i in range(rows * cols):
-            images_tiles.append(ImageTile(img, i, rows, cols, None, None))
+            images_tiles.append(ImageTile(img, i, rows, cols, scale, None, None))
     return images_tiles
 
 
@@ -84,7 +88,7 @@ def add_bg_to_tiles(img_tiles, custom_bgs, get_mask_fn):
     img_bg_tiles = []
     for bg in custom_bgs:
         for tile in img_tiles:
-            img_bg_tiles.append(ImageTile(*tile[:4], bg, get_mask_fn(tile)))
+            img_bg_tiles.append(ImageTile(*tile[:5], bg, get_mask_fn(tile)))
     return img_bg_tiles
 
 class SegmentationTileLabelList(SegmentationLabelList):
@@ -101,11 +105,11 @@ class SegmentationTileItemList(ImageList):
         return open_image_tile(fn, convert_mode=self.convert_mode, after_open=self.after_open)
 
     @classmethod
-    def from_folder(cls, path, rows, cols, custom_bgs=None, get_mask_fn=None, **kwargs) -> ItemList:
+    def from_folder(cls, path, rows, cols, scale=1, custom_bgs=None, get_mask_fn=None, **kwargs) -> ItemList:
         """Create an `ItemList` in `path` from the filenames that have a suffix in `extensions`.
         `recurse` determines if we search subfolders."""
         files = get_files(path, recurse=True)
-        img_tiled = get_tiles(files, rows, cols)
+        img_tiled = get_tiles(files, rows, cols, scale)
         if custom_bgs and get_mask_fn:
             img_tiled = add_bg_to_tiles(img_tiled, custom_bgs, get_mask_fn)
         return SegmentationTileItemList(img_tiled, **kwargs)
@@ -121,20 +125,18 @@ class SemanticSegmentationTile:
     codes = ['background', 'fruit']
 
     def __init__(self, path_imgs: Path, path_masks: Path, max_tile_size=512, bs=16, max_tol=30,
-                 transforms=get_transforms(), model=models.resnet34, custom_bg_dir=None, bg_tfms=[]):
+                 transforms=get_transforms(), model=models.resnet34, scale=1, custom_bg_dir=None, bg_tfms=[]):
         """
         images and masks must be all of the same size!
         """
         self.path_imgs = path_imgs
         self.path_msks = path_masks
 
-        bgs = []
         if custom_bg_dir:
-            for bg in get_files(custom_bg_dir):
-                bgs.append(CustomBackground(bg, bg_tfms))
+            bgs = [CustomBackground(bg, bg_tfms) for bg in get_files(custom_bg_dir)]
 
         # need to get 1 image find the size and call calc_n_tile        
-        self.img_size = open_image(get_files(path_imgs, None, recurse=True)[0]).size
+        self.img_size = open_image_cached(get_files(path_imgs, None, recurse=True)[0], scale=scale).size
 
         (self.rows, self.y_tile, self.y_diff), (self.cols, self.x_tile, self.x_diff) \
             = SemanticSegmentationTile.calc_n_tiles(self.img_size, max_tile_size, max_tol)
@@ -144,7 +146,7 @@ class SemanticSegmentationTile:
               f"\nsize of tiles: ({self.y_tile}, {self.x_tile});"
               f"\ndiscared pixels due to rounding y: {self.y_diff} x: {self.x_diff}")
         self.data = (SegmentationTileItemList
-                     .from_folder(self.path_imgs, self.rows, self.cols, bgs, self.get_mask_tiles)
+                     .from_folder(self.path_imgs, self.rows, self.cols, scale, bgs, self.get_mask_tiles)
                      .split_by_rand_pct()
                      .label_from_func(self.get_mask_tiles, classes=self.codes)
                      .transform(transforms ,tfm_y=True)
@@ -160,9 +162,9 @@ class SemanticSegmentationTile:
         return self.path_msks / path.name
 
     def get_mask_tiles(self, image_tile: ImageTile):
-        path, idx, rows, cols, _, _ = image_tile
+        path, idx, rows, cols, scale, _, _ = image_tile
         path = self.get_maskp(path)
-        return ImageMaskTile(path, idx, rows, cols)
+        return ImageMaskTile(path, idx, rows, cols, scale)
 
 
     @staticmethod
@@ -194,13 +196,13 @@ class SemanticSegmentationTile:
         y = SemanticSegmentationTile.best_block_divide(y, tile_max_size, max_tol)
         return y, x
 
-    def predict_mask(self, img_path):
+    def predict_mask(self, img_path, scale=1):
         # init mask, it is set to 0 because it is bigger than the sum of all tiles
         mask = torch.zeros(1, self.img_size[0], self.img_size[1], dtype=torch.int64)
         # Maybe need to use pred_batch for better performance
         for row, col in product(range(self.rows), range(self.cols)):
             tile_idx = row * self.cols + col  # get the index of the tile
-            img_tile = ImageTile(img_path, idx=tile_idx, rows=self.rows, cols=self.cols, custom_bg=None, mask=None)
+            img_tile = ImageTile(img_path, tile_idx, self.rows, self.cols, scale, None, None)
             img_tile = open_image_tile(img_tile)
             mask_tile, _, _ = self.learn.predict(img_tile)
 
@@ -280,7 +282,7 @@ class SemanticSegmentationTile:
 
 if __name__ == '__main__':
     segm = SemanticSegmentationTile(Path("dataset_segmentation/images"), Path("dataset_segmentation/labels"),
-                                    max_tile_size=256, model=models.resnet18,
+                                    max_tile_size=256, model=models.resnet18, scale=2,
                                     custom_bg_dir="backgrounds", bg_tfms=get_transforms()[0])
 
     segm.learn = segm.learn.load("resnet18_4_epoch_freezed_1e-4_bg_0000")
