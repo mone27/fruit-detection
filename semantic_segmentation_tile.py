@@ -6,7 +6,7 @@ from fastai.vision import *
 from math import ceil
 
 # not so nice hardcoded constant
-CACHE_MAX_SIZE = 20
+CACHE_MAX_SIZE = 40
 
 # looks like a non consistent API to have mask in ImageTile
 ImageTile = namedtuple('ImageTile', 'path idx rows cols custom_bg mask')
@@ -32,8 +32,8 @@ class CustomBackground:
         ny = ceil(y / bg_y)
         f_bg = torch.empty((bg_z, ny * bg_y, nx * bg_x), dtype=self.bg.data.dtype)
         for ix, iy in product(range(nx), range(ny)):
-            f_bg[:, bg_y * iy:bg_y * (iy + 1), bg_x * ix:bg_x * (ix + 1)] = self.bg.apply_tfms(self.tfms).data
-        return Image(f_bg[:, :y, :x])
+            f_bg[:, bg_y * iy:bg_y * (iy + 1), bg_x * ix:bg_x * (ix + 1)] = self.bg.data
+        return Image(f_bg[:, :y, :x]).apply_tfms(self.tfms)
 
 
 @lru_cache(maxsize=CACHE_MAX_SIZE)
