@@ -4,6 +4,7 @@ from functools import lru_cache
 from itertools import product
 from fastai.vision import *
 from math import ceil
+import random
 
 # not so nice hardcoded constant
 CACHE_MAX_SIZE = 40
@@ -14,7 +15,7 @@ ImageMaskTile = namedtuple('ImageMaskTile', 'path idx cols scale rows')
 
 
 class CustomBackground:
-    def __init__(self, bg_path: Image, tfms: TfmList = []):
+    def __init__(self, bg_path , tfms: TfmList = []):
         """bgs_dir a folder with all backgrounds, tfms list of transformation to be applied on bgs"""
         self.bg = open_image(bg_path)
         self.tfms = tfms
@@ -39,13 +40,13 @@ class CustomBackground:
 @lru_cache(maxsize=CACHE_MAX_SIZE)
 def open_image_cached(*args, scale=1, **kwargs):
     img = open_image(*args, **kwargs)
-    return img.resize((1, img.size[0] // scale, img.size[1] // scale)).refresh()
+    return img.resize((1, round(img.size[0]/scale), round(img.size[1]/scale))).refresh()
 
 
 @lru_cache(maxsize=CACHE_MAX_SIZE)
 def open_mask_cached(*args, scale=1, **kwargs):
     mask = open_mask(*args, **kwargs)
-    return mask.resize((1, mask.size[0] // scale, mask.size[1] // scale)).refresh()
+    return mask.resize((1, round(mask.size[0]/scale), round(mask.size[1]/scale))).refresh()
 
 
 def get_image_tile(img: Image, idx, rows, cols) -> Image:
@@ -84,10 +85,11 @@ def get_tiles(images, rows: int, cols: int, scale: int) -> Collection[ImageTile]
     return images_tiles
 
 
-def add_bg_to_tiles(img_tiles, custom_bgs, get_mask_fn):
+def add_bg_to_tiles(img_tiles, custom_bgs, num_bgs, get_mask_fn):
     img_bg_tiles = []
-    for bg in custom_bgs:
+    for _ in range(num_bgs):
         for tile in img_tiles:
+            bg = random.choice(custom_bgs)
             img_bg_tiles.append(ImageTile(*tile[:5], bg, get_mask_fn(tile)))
     return img_bg_tiles
 
@@ -105,13 +107,13 @@ class SegmentationTileItemList(ImageList):
         return open_image_tile(fn, convert_mode=self.convert_mode, after_open=self.after_open)
 
     @classmethod
-    def from_folder(cls, path, rows, cols, scale=1, custom_bgs=None, get_mask_fn=None, **kwargs) -> ItemList:
+    def from_folder(cls, path, rows, cols, scale=1, custom_bgs=None, num_bgs=3, get_mask_fn=None, **kwargs) -> ItemList:
         """Create an `ItemList` in `path` from the filenames that have a suffix in `extensions`.
         `recurse` determines if we search subfolders."""
         files = get_files(path, recurse=True)
         img_tiled = get_tiles(files, rows, cols, scale)
         if custom_bgs and get_mask_fn:
-            img_tiled = add_bg_to_tiles(img_tiled, custom_bgs, get_mask_fn)
+            img_tiled = add_bg_to_tiles(img_tiled, custom_bgs, num_bgs, get_mask_fn)
         return SegmentationTileItemList(img_tiled, **kwargs)
 
 def seg_accuracy(input, target):
@@ -123,9 +125,13 @@ class SemanticSegmentationTile:
     """Class for all semantic segmentation"""
 
     codes = ['background', 'fruit']
+    
+    def __getattr__(attr):
+        return getattr(self.learn, attr, None)
 
     def __init__(self, path_imgs: Path, path_masks: Path, max_tile_size=512, bs=16, max_tol=30,
-                 transforms=get_transforms(), model=models.resnet34, scale=1, custom_bg_dir=None, bg_tfms=[]):
+                 transforms=get_transforms(), model=models.resnet34, scale=1, valid_split=.8, custom_bg_dir=None,
+                 num_bgs=3, bg_tfms=[]):
         """
         images and masks must be all of the same size!
         """
@@ -133,7 +139,7 @@ class SemanticSegmentationTile:
         self.path_msks = path_masks
 
         if custom_bg_dir:
-            bgs = [CustomBackground(bg, bg_tfms) for bg in get_files(custom_bg_dir)]
+            bgs = [CustomBackground(bg, bg_tfms) for bg in get_files(custom_bg_dir, recurse=True)]
 
         # need to get 1 image find the size and call calc_n_tile        
         self.img_size = open_image_cached(get_files(path_imgs, None, recurse=True)[0], scale=scale).size
@@ -146,8 +152,8 @@ class SemanticSegmentationTile:
               f"\nsize of tiles: ({self.y_tile}, {self.x_tile});"
               f"\ndiscared pixels due to rounding y: {self.y_diff} x: {self.x_diff}")
         self.data = (SegmentationTileItemList
-                     .from_folder(self.path_imgs, self.rows, self.cols, scale, bgs, self.get_mask_tiles)
-                     .split_by_rand_pct()
+                     .from_folder(self.path_imgs, self.rows, self.cols, scale, bgs, num_bgs, self.get_mask_tiles)
+                     .split_by_rand_pct(valid_split)
                      .label_from_func(self.get_mask_tiles, classes=self.codes)
                      .transform(transforms ,tfm_y=True)
                      .databunch(bs=bs)
@@ -210,6 +216,39 @@ class SemanticSegmentationTile:
             self.x_tile * col:self.x_tile * (col + 1)] = mask_tile.data
         return ImageSegment(mask)
 
+    @staticmethod
+    def iou_score(real_mask: ImageSegment, pred_mask: ImageSegment):
+        pred_mask, real_mask = pred_mask.data, real_mask.data
+        wrong = np.count_nonzero(pred_mask != real_mask)
+        intersection = np.logical_and(real_mask, pred_mask)
+        union = np.logical_or(real_mask, pred_mask)
+        iou_score = torch.div(torch.sum(intersection), torch.sum(union).float())
+        return iou_score
+    
+    def bench_valid_ds(self):
+        res = np.empty((len(self.data.valid_ds), 2), dtype=np.dtype(object, int))
+        for i, o in enumerate(self.data.valid_ds):
+            pred, _, _ = self.learn.predict(o[0])
+            score = self.iou_score(o[1], pred)
+            res[i] = [o[0], score]
+        return res
+    
+    
+    def export_model_score(self, exp_file, exp_dir):
+        exp_dir = Path(exp_dir)        
+        run_id = random.randint(0,1000) # get unique run id
+        exp_dir = exp_dir / run_id
+        exp_dir.mkdir(parents=True, exist_ok=True)
+        res = self.bench_valid_ds()
+        paths = np.empty(res.shape[0], dtype=object)
+        for i, el in enumerate(res):
+            path = exp_dir / f"tile_n_{i}"
+            i[0].save(path)
+            paths[i] = path
+        res[:, 0] = paths
+        res.savetxt(exp_file)
+        
+    
     def seg_test_image_tile(self, img: ImageTile, real_mask: ImageTile):
         pred_mask, _, _ = inf_learn.predict(open_image_tile(img))
         real_mask = open_image_tile(real_mask, div=True, mask=True)
@@ -219,7 +258,7 @@ class SemanticSegmentationTile:
         iou_score = torch.div(torch.sum(intersection), torch.sum(union).float())
 
         return iou_score, wrong
-
+    
     # warning img_size: number of pixels
     def seg_benchmark_tile(self, path_img):
         "benchmarks the full dataset in path_img analysing the single tiles"
