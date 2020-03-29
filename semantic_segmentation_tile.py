@@ -51,17 +51,18 @@ class ImageTile(BaseImageTile):
     custom_bg: CustomBackground = None
     mask: ImageSegment = None
 
+def resize_img(img, scale): return img.resize((round(img.size[0] / scale), round(img.size[1] / scale)), PIL.Image.NEAREST)
         
 @lru_cache(maxsize=CACHE_MAX_SIZE)
 def open_image_cached(*args, scale=1, **kwargs) -> Image:
-    img = open_image(*args, **kwargs)
-    return img.resize((1, round(img.size[0] / scale), round(img.size[1] / scale))).refresh()
-
+    # replacing after_open, remote probability stuff can blow up here
+    kwargs['after_open'] = partial(resize_img, scale=scale)
+    return open_image(*args, **kwargs)
 
 @lru_cache(maxsize=CACHE_MAX_SIZE)
 def open_mask_cached(*args, scale=1, **kwargs) -> ImageSegment:
-    mask = open_mask(*args, **kwargs)
-    return mask.resize((1, round(mask.size[0] / scale), round(mask.size[1] / scale))).refresh()
+    kwargs['after_open'] = partial(resize_img, scale=scale)
+    return open_mask(*args, **kwargs)
 
 
 def get_image_tile(img: Image, idx, tile_sz) -> Image:
@@ -138,6 +139,15 @@ def seg_accuracy(input, target):
     return (input.argmax(dim=1)==target).float().mean()
 
 def iou(*args): return dice(*args, iou=True)
+
+#custom transform
+def _add_color(x, min=-.5, max=.5, channel=None):
+    """transfomr to add (or remove) a fixed amount(between -1 and 1) of a color for all pixels"""
+    if channel is None: channel = np.random.randint(0, x.shape[0] - 1)
+    amount = random.uniform(min,max)
+    x[channel] = (x[channel] + amount).clamp(0., 1.)
+    return x
+add_color = TfmPixel(_add_color)
 
 
 class SemanticSegmentationTile:
@@ -239,73 +249,6 @@ class SemanticSegmentationTile:
     def interpet(self):
         return SegmentationTileInterpretation.from_learner(self.learn, tile_size=(self.y_tile, self.x_tile))
     
-    
-    def seg_test_image_tile(self, img: ImageTile, real_mask: ImageTile):
-        pred_mask, _, _ = inf_learn.predict(open_image_tile(img))
-        real_mask = open_image_tile(real_mask, div=True, mask=True)
-        wrong = np.count_nonzero(pred_mask.data != real_mask.data)
-        intersection = np.logical_and(real_mask.data, pred_mask.data)
-        union = np.logical_or(real_mask.data, pred_mask.data)
-        iou_score = torch.div(torch.sum(intersection), torch.sum(union).float())
-
-        return iou_score, wrong
-    
-    # warning img_size: number of pixels
-    def seg_benchmark_tile(self, path_img):
-        "benchmarks the full dataset in path_img analysing the single tiles"
-        imgs = get_image_files(path_img)
-        imgs = get_tiles(imgs, rows, cols)
-        masks = [get_labels_tiles(f) for f in imgs]
-        wrongs = torch.empty(len(imgs), dtype=torch.float32)
-        iou_scores = torch.empty(len(imgs), dtype=torch.float32)
-        for i, img, mask in zip(range(len(imgs)), imgs, masks):
-            iou_score, wrong = seg_test_image_tile(img, mask)
-            wrongs[i] = wrong
-            iou_scores[i] = iou_score
-
-        wrong_perc = torch.mean(wrongs) * 100 / imgs[0].size.prod() # should be image size
-        print(f"perc of wrong pixels: {wrong_perc}%")
-        print(f"mean accuracy: {100 - wrong_perc}%")
-        print(f"max wrong per image: {torch.max(wrongs)} over {img_size} pixels")
-        print(f"mean IoU: {torch.mean(iou_scores)}")
-        print(f"min IoU: {torch.min(iou_scores)}")
-
-    def seg_test_full_image(self, img_p: PathOrStr):
-        pred_mask = predict_mask(img_p)
-        real_mask = open_mask(get_label(img_p), div=True)
-        pred_mask, real_mask = pred_mask.data, real_mask.data
-        wrong = np.count_nonzero(pred_mask != real_mask)
-
-        intersection = np.logical_and(real_mask, pred_mask)
-        union = np.logical_or(real_mask, pred_mask)
-        iou_score = torch.div(torch.sum(intersection), torch.sum(union).float())
-
-        return iou_score, wrong
-
-    def plot_pixel_difference_tile(img, real_mask, figsize=(20, 20)):
-        img = open_image_tile(img)
-        pred_mask, _, _ = inf_learn.predict(img)
-        real_mask = open_image_tile(real_mask, mask=True, div=True)
-        real_mask = image2np(real_mask.data)
-        pred_mask = image2np(pred_mask.data)
-        img = image2np(img.data)
-        diff = pred_mask != real_mask
-        img[diff == 1] = (1, 0, 0)  # 0000FF is blue FF0000 is red
-        fig, ax = plt.subplots(figsize=figsize)
-        ax.imshow(img)
-
-    def plot_pixel_difference_full(img_p, mask_p, figsize=(20, 20)):
-        img = open_image(img_p)
-        pred_mask = predict_mask(img_p)
-        real_mask = open_mask(mask_p, div=True)
-        real_mask = image2np(real_mask.data)
-        pred_mask = image2np(pred_mask.data)
-        img = image2np(img.data)
-        diff = pred_mask != real_mask
-        #     breakpoint()
-        img[diff == 1] = (1, 0, 0)  # 0000FF is blue FF0000 is red
-        fig, ax = plt.subplots(figsize=figsize)
-        ax.imshow(img)
 
 
 class SegmentationTileInterpretation(SegmentationInterpretation):
