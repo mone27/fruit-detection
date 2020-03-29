@@ -13,16 +13,15 @@ CACHE_MAX_SIZE = 40
 class CustomBackground:
     def __init__(self, bg_path , tfms: TfmList = []):
         """bgs_dir a folder with all backgrounds, tfms list of transformation to be applied on bgs"""
-        self.bg = open_image(bg_path)
-        self.tfms = tfms
+        self.bg = open_image(bg_path).apply_tfms(tfms)
 
     def apply(self, img: Image, mask: ImageSegment) -> Image:
         """replaces the background in"""
         mask = mask.data.type(torch.ByteTensor)
-        new_bg = self._repeat_bg_tfms(img.size)
+        new_bg = self._repeat_bg(img.size)
         return Image(torch.where(mask, img.data, new_bg.data))
 
-    def _repeat_bg_tfms(self, size: Tuple[int, int]) -> TensorImage:
+    def _repeat_bg(self, size: Tuple[int, int]) -> TensorImage:
         y, x = size
         bg_z, bg_y, bg_x = self.bg.shape
         nx = ceil(x / bg_x)
@@ -30,7 +29,7 @@ class CustomBackground:
         f_bg = torch.empty((bg_z, ny * bg_y, nx * bg_x), dtype=self.bg.data.dtype)
         for ix, iy in product(range(nx), range(ny)):
             f_bg[:, bg_y * iy:bg_y * (iy + 1), bg_x * ix:bg_x * (ix + 1)] = self.bg.data
-        return Image(f_bg[:, :y, :x]).apply_tfms(self.tfms)
+        return Image(f_bg[:, :y, :x])
 
 
 @dataclass(repr=True)
@@ -52,7 +51,7 @@ class ImageTile(BaseImageTile):
     custom_bg: CustomBackground = None
     mask: ImageSegment = None
 
-
+        
 @lru_cache(maxsize=CACHE_MAX_SIZE)
 def open_image_cached(*args, scale=1, **kwargs) -> Image:
     img = open_image(*args, **kwargs)
@@ -179,7 +178,7 @@ class SemanticSegmentationTile:
                      .normalize(imagenet_stats)) # needed because it use pretrained resnet on ImageNet
         print(f"created Dataset with in: {len(self.data.train_ds)} tiles train and {len(self.data.valid_ds)} in valid",
              "\ncreating learner ...")
-        self.learn = unet_learner(self.data, model, metrics=seg_accuracy)
+        self.learn = unet_learner(self.data, model, metrics=[dice, partial(dice, iou=True), seg_accuracy])
         print("done")
         
 
@@ -236,38 +235,29 @@ class SemanticSegmentationTile:
 
     def interpet(self):
         return SegmentationTileInterpretation.from_learner(self.learn, tile_size=(self.y_tile, self.x_tile))
-
-    @staticmethod
-    def iou_score(real_mask: ImageSegment, pred_mask: ImageSegment):
-        pred_mask, real_mask = pred_mask.data, real_mask.data
-        wrong = np.count_nonzero(pred_mask != real_mask)
-        intersection = np.logical_and(real_mask, pred_mask)
-        union = np.logical_or(real_mask, pred_mask)
-        iou_score = torch.div(torch.sum(intersection), torch.sum(union).float())
-        return iou_score
     
-    def bench_valid_ds(self):
-        res = np.empty((len(self.data.valid_ds), 2), dtype=np.dtype(object, int))
-        for i, o in enumerate(self.data.valid_ds):
-            pred, _, _ = self.learn.predict(o[0])
-            score = self.iou_score(o[1], pred)
-            res[i] = [o[0], score]
-        return res
+#     def bench_valid_ds(self):
+#         res = np.empty((len(self.data.valid_ds), 2), dtype=np.dtype(object, int))
+#         for i, o in enumerate(self.data.valid_ds):
+#             pred, _, _ = self.learn.predict(o[0])
+#             score = self.iou_score(o[1], pred)
+#             res[i] = [o[0], score]
+#         return res
     
     
-    def export_model_score(self, exp_file, exp_dir):
-        exp_dir = Path(exp_dir)        
-        run_id = random.randint(0,1000) # get unique run id
-        exp_dir = exp_dir / run_id
-        exp_dir.mkdir(parents=True, exist_ok=True)
-        res = self.bench_valid_ds()
-        paths = np.empty(res.shape[0], dtype=object)
-        for i, el in enumerate(res):
-            path = exp_dir / f"tile_n_{i}"
-            i[0].save(path)
-            paths[i] = path
-        res[:, 0] = paths
-        res.savetxt(exp_file)
+#     def export_model_score(self, exp_file, exp_dir):
+#         exp_dir = Path(exp_dir)        
+#         run_id = random.randint(0,1000) # get unique run id
+#         exp_dir = exp_dir / run_id
+#         exp_dir.mkdir(parents=True, exist_ok=True)
+#         res = self.bench_valid_ds()
+#         paths = np.empty(res.shape[0], dtype=object)
+#         for i, el in enumerate(res):
+#             path = exp_dir / f"tile_n_{i}"
+#             i[0].save(path)
+#             paths[i] = path
+#         res[:, 0] = paths
+#         res.savetxt(exp_file)
         
     
     def seg_test_image_tile(self, img: ImageTile, real_mask: ImageTile):
@@ -348,10 +338,12 @@ class SegmentationTileInterpretation(SegmentationInterpretation):
         preds_res = learn.get_preds(ds_type=ds_type, activ=activ, with_loss=True)
         return cls(learn, *preds_res, tile_size=tile_size)
 
-    def plot_top_losses_pixel_diff(self, k=10, err_color=(1, 0, 0)):
-        tloss = self.top_losses(self.tile_size, k)
-        fig, axes = plt.subplots(3, k // 3)
-        for loss, i, ax in zip(tloss.values, tloss.indices, axes.flatten()):
+    def plot_top_losses_pixel_diff(self, start=0, end=10, err_color=(1, 0, 0), figsize=(20, 20)):
+        tloss = self.top_losses(self.tile_size, end)
+        loss = tloss.values[start:]
+        indices = tloss.indices[start:]
+        fig, axes = plt.subplots(3, (end-start) // 3, figsize=figsize)
+        for loss, i, ax in zip(loss, indices, axes.flatten()):
             pred = self.pred_class[i]
             real = self.ds[i][1]
             img = self.ds[i][0]
@@ -361,6 +353,7 @@ class SegmentationTileInterpretation(SegmentationInterpretation):
             img = image2np(img.data)
             img[diff == 1] = err_color
             ax.imshow(img)
+            ax.set_title("idx: "+str(i.elem()))
 
 
 # %% tests
