@@ -132,9 +132,12 @@ class SegmentationTileItemList(ImageList):
             img_tiled = add_custom_bg_to_tiles(imgs_tiled, custom_bgs, num_bgs, get_mask_fn)
         return SegmentationTileItemList(imgs_tiled, **kwargs)
 
+# define metrics for segmenation model
 def seg_accuracy(input, target):
     target = target.squeeze(1)
     return (input.argmax(dim=1)==target).float().mean()
+
+def iou(*args): return dice(*args, iou=True)
 
 
 class SemanticSegmentationTile:
@@ -178,7 +181,7 @@ class SemanticSegmentationTile:
                      .normalize(imagenet_stats)) # needed because it use pretrained resnet on ImageNet
         print(f"created Dataset with in: {len(self.data.train_ds)} tiles train and {len(self.data.valid_ds)} in valid",
              "\ncreating learner ...")
-        self.learn = unet_learner(self.data, model, metrics=[dice, partial(dice, iou=True), seg_accuracy])
+        self.learn = unet_learner(self.data, model, metrics=[dice, iou, seg_accuracy])
         print("done")
         
 
@@ -236,29 +239,6 @@ class SemanticSegmentationTile:
     def interpet(self):
         return SegmentationTileInterpretation.from_learner(self.learn, tile_size=(self.y_tile, self.x_tile))
     
-#     def bench_valid_ds(self):
-#         res = np.empty((len(self.data.valid_ds), 2), dtype=np.dtype(object, int))
-#         for i, o in enumerate(self.data.valid_ds):
-#             pred, _, _ = self.learn.predict(o[0])
-#             score = self.iou_score(o[1], pred)
-#             res[i] = [o[0], score]
-#         return res
-    
-    
-#     def export_model_score(self, exp_file, exp_dir):
-#         exp_dir = Path(exp_dir)        
-#         run_id = random.randint(0,1000) # get unique run id
-#         exp_dir = exp_dir / run_id
-#         exp_dir.mkdir(parents=True, exist_ok=True)
-#         res = self.bench_valid_ds()
-#         paths = np.empty(res.shape[0], dtype=object)
-#         for i, el in enumerate(res):
-#             path = exp_dir / f"tile_n_{i}"
-#             i[0].save(path)
-#             paths[i] = path
-#         res[:, 0] = paths
-#         res.savetxt(exp_file)
-        
     
     def seg_test_image_tile(self, img: ImageTile, real_mask: ImageTile):
         pred_mask, _, _ = inf_learn.predict(open_image_tile(img))
@@ -336,14 +316,35 @@ class SegmentationTileInterpretation(SegmentationInterpretation):
     @classmethod
     def from_learner(cls, learn: Learner, tile_size, ds_type: DatasetType = DatasetType.Valid, activ: nn.Module = None):
         preds_res = learn.get_preds(ds_type=ds_type, activ=activ, with_loss=True)
-        return cls(learn, *preds_res, tile_size=tile_size)
+        return cls(learn, *preds_res, tile_size=tile_size)            
+            
+    def topk_by_metric(self, metric, k=10, largest=False):
+        metric_name = metric.__name__
+        if not hasattr(self, metric_name):
+            n = len(self.ds)
+            res = torch.empty(n)
+            prog_bar = progress_bar(range(n))
+            prog_bar.comment = f"calc metric: {metric_name}"
+            preds = self.preds
+            y_true = self.y_true
+            for i in prog_bar:
+                res[i] = metric(preds[i][None], y_true[i][None])
 
-    def plot_top_losses_pixel_diff(self, start=0, end=10, err_color=(1, 0, 0), figsize=(20, 20)):
-        tloss = self.top_losses(self.tile_size, end)
-        loss = tloss.values[start:]
-        indices = tloss.indices[start:]
-        fig, axes = plt.subplots(3, (end-start) // 3, figsize=figsize)
-        for loss, i, ax in zip(loss, indices, axes.flatten()):
+            setattr(self, metric_name, res.cpu())
+        return getattr(self, metric_name).topk(k, largest=largest)
+    
+    def plot_topk_metric_pixel_diff(self, metric, start=0, end=10, err_color=(1, 0, 0), n_rows=3, figsize=(20, 20)):
+        
+        if metric == 'loss':
+            topk = self.top_losses(self.tile_size, end)
+            mname = 'loss'
+        else:
+            topk = self.topk_by_metric(metric, end)
+            mname = metric.__name__
+        metric_vals = topk.values[start:]
+        indices = topk.indices[start:]
+        fig, axes = plt.subplots(3, (end-start) // n_rows, figsize=figsize)
+        for metric_val, i, ax in zip(metric_vals, indices, axes.flatten()):
             pred = self.pred_class[i]
             real = self.ds[i][1]
             img = self.ds[i][0]
@@ -353,7 +354,7 @@ class SegmentationTileInterpretation(SegmentationInterpretation):
             img = image2np(img.data)
             img[diff == 1] = err_color
             ax.imshow(img)
-            ax.set_title("idx: "+str(i.elem()))
+            ax.set_title(f"idx: {i}, {mname}: {metric_val}")
 
 
 # %% tests
