@@ -1,53 +1,102 @@
 import cv2
 import numpy as np
+from fastai.vision import Image, ImageSegment, image2np
+from typing import *
+import matplotlib.pyplot as plt
 
-# Copyright
+OpenCvImage = np.ndarray
+
+
+# migrate to OpenCv 4.x ? (if can be installed on conda)
+
+def get_contours(image):
+    """just a wrapper around cv2.findContours"""
+    _, contours, _ = cv2.findContours(image, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    return contours
+
+
+class ImageDivider:
+    # Attention: this class uses OpenCv images notation (width, height) so means stuff need to indexed (cols, rows)
+    def __init__(self, img: OpenCvImage, mask: OpenCvImage, clean_mask=True, max_area=3, min_area=50):
+        self.img = img
+        self.mask = mask
+        # min and max area are in % need to adjust them to picture size
+        img_area = np.prod(self.img.shape[:2])
+        self.max_area = max_area / 100 * img_area
+        self.min_area = min_area / 100 * img_area
+
+        if clean_mask: self._clean_mask()
+        self._get_bounding_rects()
+        self._clean_image()  # removes image background using the mask
+
+    def images(self) -> List[OpenCvImage]:
+        return self._get_individual_images(self.img)
+
+    def masks(self) -> List[OpenCvImage]:
+        return self._get_individual_images(self.mask)
+
+    @classmethod
+    def from_fastai(cls, img: Image, mask: ImageSegment):
+        return cls(image2np(img.data), image2np(mask.data.squeeze()))
+
+    def _get_bounding_rects(self):
+        self.bounding_rects = [cv2.boundingRect(contour) for contour in get_contours(self.mask)]
+
+    def _get_individual_images(self, img):
+        ret = []
+        for x, y, w, h in self.bounding_rects:
+            ret.append(self.img[y:y + h, x:x + w])
+        return ret
+
+    def _clean_mask(self):
+        """remove from mask all part that are smaller or bigger than the given area limits"""
+        contours = get_contours(self.mask)
+        for contour in contours:
+            area = cv2.contourArea(contour)
+            if area < self.min_area or area > self.max_area:
+                x, y, w, h = cv2.boundingRect(contour)
+                cv2.rectangle(self.mask, (x, y), (x + w + 10, y + h + 10), 0, -1)
+
+    def _clean_image(self):
+        self.img = self.img & self.mask[:, :, None]
+
+
+def perc(a, b): return int(a * b / 100)
 
 
 class ClassicSegmentation:
     """A class for image segmentation usage:"""
 
-    def __init__(self,filename, **kwargs):
-        """parameter:
-            filename (must be specified) path to the image file
-            threshold = 100
-            denoise = 3
-            min_area = 3
-            max_area = 50
-            """
-        self.cut_left = kwargs.get('cut_left', 5)
-        self.cut_right = kwargs.get('cut_right', 95)
-        self.cut_top = kwargs.get('cut_top', 5)
-        self.cut_bottom = kwargs.get('cut_bottom', 95)
-        self.image = cv2.imread(str(filename))
-        self.mask = None
-        self.denoise_size = kwargs.get('denoise', 3)
-        self.threshold = kwargs.get('threshold', 100)
-        width = self.image.shape[:2][1]
-        self.min_area = int(width * kwargs.get('max_area', 3) / 100) ** 2  # set default value
-        self.max_area = int(width * kwargs.get('min_area', 50) / 100) ** 2  # set default value
+    def __init__(self, img_path, threshold=100, cut=(5, 95, 5, 95), denoise_size=3):
+        self.image = cv2.cvtColor(cv2.imread(str(img_path)), cv2.COLOR_BGR2RGB)
+        self.denoise_size = denoise_size
+        self.threshold = threshold
 
-        self.individual_masks = []
-        self.individual_images = []
-        # can call get_mask() here...
-        self._cut_image()
-        self.get_mask()
+        self.orig_size = self.image.shape[:2]
+        w, h = self.orig_size
+        self.cut = perc(w, cut[0]), perc(w, cut[1]), perc(h, cut[2]), perc(h, cut[3])
 
     def get_mask(self):
+        self._cut_image()
+
         self.mask = cv2.cvtColor(self.image, cv2.COLOR_BGR2GRAY)
         _, self.mask = cv2.threshold(self.mask, self.threshold, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        self._floodfill()._denoise()
-        self._clean_mask()
-    
-    
+        self._floodfill()
+        self._denoise()
+
+        self._add_padding()
+
+    def _denoise(self):
+        kernel = np.ones((self.denoise_size, self.denoise_size), np.uint8)
+        self.mask = cv2.morphologyEx(self.mask, cv2.MORPH_OPEN, kernel, iterations=2)
+
+    def _add_padding(self):
+        mask = np.zeros(self.orig_size, np.uint8)
+        mask[self.cut[0]:self.cut[1], self.cut[2]:self.cut[3]] = self.mask
+        self.mask = mask
 
     def _cut_image(self):
-        h, w = self.image.shape[:2]
-        w_left = int(w * self.cut_left / 100)
-        w_right = int(w * self.cut_right / 100)
-        h_top = int(h * self.cut_top / 100)
-        h_bottom = int(h * self.cut_bottom / 100)
-        self.image = self.image[h_top:h_bottom, w_left:w_right, :]
+        self.image = self.image[self.cut[0]:self.cut[1], self.cut[2]:self.cut[3], :]
 
     def _floodfill(self):
         mask_floodfill = self.mask.copy()
@@ -56,64 +105,15 @@ class ClassicSegmentation:
         cv2.floodFill(mask_floodfill, mask, (0, 0), 255)
         mask_floodfill_inv = cv2.bitwise_not(mask_floodfill)
         self.mask = self.mask | mask_floodfill_inv
-        return self
 
     def show(self):
-        # can refactor to use
-        cv2.namedWindow("image: ", cv2.WINDOW_NORMAL)
-        cv2.namedWindow("mask: ", cv2.WINDOW_GUI_NORMAL)
-        cv2.resizeWindow("mask: ", 1920, 1080)
-        cv2.imshow("image: ", self.image)
-        cv2.imshow("mask: ", self.mask)
-        cv2.waitKey(0)
-        cv2.destroyAllWindows()
-
-    def _denoise(self):
-        kernel = np.ones((self.denoise_size, self.denoise_size), np.uint8)
-        self.mask = cv2.morphologyEx(self.mask, cv2.MORPH_OPEN, kernel, iterations=2)
-        return self
-
-    @staticmethod
-    def get_contours(image):
-        """just a wrapper around cv2.findContours"""
-        _, contours, _ = cv2.findContours(image, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        return contours
-
-    def _clean_mask(self):
-        contours = self.get_contours(self.mask)
-        for contour in contours:
-            area = cv2.contourArea(contour)
-            if area < self.min_area or area > self.max_area:
-                x, y, w, h = cv2.boundingRect(contour)
-                cv2.rectangle(self.mask, (x, y), (x + w + 10, y + h + 10), 0, -1)
-
-    def _clean_image(self):
-        self.image = self.image & \
-                np.stack([self.mask, self.mask, self.mask], axis=2) #to make background perfectly black
-
-    def _calculate_individual_masks(self):
-        if self.individual_masks:  # skip if already executed
-            return
-        self.get_mask()
-        self._clean_image()
-        contours = self.get_contours(self.mask)
-
-        for contour in contours:
-            x, y, w, h = cv2.boundingRect(contour)
-            image_section = self.image[y:y + h, x:x + w]
-            mask_section = self.mask[y:y + h, x:x + w]
-            self.individual_masks.append(mask_section)
-            self.individual_images.append(image_section)
-
-    @property
-    def small_masks(self):
-        self._calculate_individual_masks()
-        return self.individual_masks
-
-    @property
-    def small_images(self):
-        self._calculate_individual_masks()
-        return self.individual_images
+        fig, ax = plt.subplots(1, 2)
+        ax[0].imshow(self.image)
+        ax[1].imshow(self.mask)
 
 
-
+# %% test
+if __name__ == "__main__":
+    img = cv2.imread("dataset_segmentation/images/albicocche1.png")
+    mask = cv2.cvtColor(cv2.imread('dataset_segmentation/labels/albicocche1.png'), cv2.COLOR_BGR2GRAY)
+    print(ImageDivider(img, mask, clean_mask=False).images())
