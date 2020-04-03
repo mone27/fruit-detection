@@ -11,9 +11,11 @@ import random
 CACHE_MAX_SIZE = 40
 
 class CustomBackground:
-    def __init__(self, bg_path , tfms: TfmList = []):
-        """bgs_dir a folder with all backgrounds, tfms list of transformation to be applied on bgs"""
-        self.bg = open_image(bg_path).apply_tfms(tfms)
+    def __init__(self, bg_path , tfms: TfmList = [], size=None):
+        """tfms list of transformation to be applied on bgs"""
+        self.bg = open_image_cached(bg_path)
+        if size: self.bg = self._repeat_bg(size) # same size to have better data augmentation using final size
+        self.bg = self.bg.apply_tfms(tfms)
 
     def apply(self, img: Image, mask: ImageSegment) -> Image:
         """replaces the background in"""
@@ -22,6 +24,7 @@ class CustomBackground:
         return Image(torch.where(mask, img.data, new_bg.data))
 
     def _repeat_bg(self, size: Tuple[int, int]) -> TensorImage:
+        if self.bg.size == size: return self.bg
         y, x = size
         bg_z, bg_y, bg_x = self.bg.shape
         nx = ceil(x / bg_x)
@@ -55,7 +58,7 @@ def resize_img(img, scale): return img.resize((round(img.size[0] / scale), round
         
 @lru_cache(maxsize=CACHE_MAX_SIZE)
 def open_image_cached(*args, scale=1, **kwargs) -> Image:
-    # replacing after_open, remote probability stuff can blow up here
+    # replacing after_open, remote possibility stuff can blow up here
     kwargs['after_open'] = partial(resize_img, scale=scale)
     return open_image(*args, **kwargs)
 
@@ -99,13 +102,13 @@ def get_tiles(images, rows: int, cols: int, tile_info: Collection) -> Collection
     return images_tiles
 
 
-def add_custom_bg_to_tiles(img_tiles: Collection[ImageTile], custom_bgs: Collection[CustomBackground], num_bgs,
+def add_custom_bg_to_tiles(img_tiles: Collection[ImageTile], custom_bgs: Collection[Tuple[Path, List]], num_bgs,
                            get_mask_fn):
     img_bg_tiles = []
     for _ in range(num_bgs):
         for tile in img_tiles:
             bg = random.choice(custom_bgs)
-            tile.custom_bg = bg
+            tile.custom_bg = CustomBackground(bg[0], bg[1], size=tile.tile_sz)
             tile.mask = get_mask_fn(tile)
             img_bg_tiles.append(tile)
     return img_bg_tiles
@@ -167,12 +170,14 @@ class SemanticSegmentationTile:
         self.path_imgs = path_imgs
         self.path_msks = path_masks
 
-        bgs = None
-        if custom_bg_dir:
-            bgs = [CustomBackground(bg, bg_tfms) for bg in get_files(custom_bg_dir, recurse=True)]
+        
 
         # need to get 1 image find the size and call calc_n_tile        
         self.img_size = open_image_cached(get_files(path_imgs, None, recurse=True)[0], scale=scale).size
+        
+        bgs = None
+        if custom_bg_dir:
+            bgs = [(bg, bg_tfms) for bg in get_files(custom_bg_dir, recurse=True)]
 
         (self.rows, self.y_tile, self.y_diff), (self.cols, self.x_tile, self.x_diff) \
             = SemanticSegmentationTile.calc_n_tiles(self.img_size, max_tile_size, max_tol)
@@ -255,11 +260,13 @@ class SegmentationTileInterpretation(SegmentationInterpretation):
     def __init__(self, *args, tile_size=None):
         super().__init__(*args)
         self.tile_size = tile_size
-
+        self.n = len(self.ds)
+        
     @classmethod
     def from_learner(cls, learn: Learner, tile_size, ds_type: DatasetType = DatasetType.Valid, activ: nn.Module = None):
         preds_res = learn.get_preds(ds_type=ds_type, activ=activ, with_loss=True)
-        return cls(learn, *preds_res, tile_size=tile_size)            
+        return cls(learn, *preds_res, tile_size=tile_size) 
+    
             
     def topk_by_metric(self, metric, k=10, largest=False):
         metric_name = metric.__name__
@@ -276,8 +283,7 @@ class SegmentationTileInterpretation(SegmentationInterpretation):
             setattr(self, metric_name, res.cpu())
         return getattr(self, metric_name).topk(k, largest=largest)
     
-    def plot_topk_metric_pixel_diff(self, metric, start=0, end=10, err_color=(1, 0, 0), n_rows=3, figsize=(20, 20)):
-        
+    def plot_topk_metric_pixel_diff(self, metric, start=0, end=10, err_color=(1, 0, 0), n_rows=3, figsize=(20, 20)):        
         if metric == 'loss':
             topk = self.top_losses(self.tile_size, end)
             mname = 'loss'
@@ -288,16 +294,29 @@ class SegmentationTileInterpretation(SegmentationInterpretation):
         indices = topk.indices[start:]
         fig, axes = plt.subplots(3, (end-start) // n_rows, figsize=figsize)
         for metric_val, i, ax in zip(metric_vals, indices, axes.flatten()):
-            pred = self.pred_class[i]
-            real = self.ds[i][1]
-            img = self.ds[i][0]
-            pred = image2np(pred[None])
-            real = image2np(real.data)
-            diff = pred != real
-            img = image2np(img.data)
-            img[diff == 1] = err_color
-            ax.imshow(img)
-            ax.set_title(f"idx: {i}, {mname}: {metric_val}")
+            self.plot_pixel_diff(i, descpr=f"{mname}: {metric_val}", ax=ax)
+            
+    def plot_pixel_diff(self, i, descrp="", ax=plt.plot, err_color=(1, 0, 0), n_rows=3, figsize=(20, 20)):
+        pred = self.pred_class[i]
+        real = self.ds[i][1]
+        img = self.ds[i][0]
+        pred = image2np(pred[None])
+        real = image2np(real.data)
+        diff = pred != real
+        img = image2np(img.data)
+        img[diff == 1] = err_color
+        ax.imshow(img)
+        ax.set_title(f"idx: {i}, {descrp}")
+    
+    def to_df(self, attrs=[], extra_fn=[]): 
+        """extra_fn other funcs that receive self and must return an numpy array of Dataset length"""
+        header = ['index'] + listify(attrs) + [fn.__name__ for fn in listify(extra_fn)]
+        attrs = [getattr(self, attr).numpy() for attr in listify(attrs)]
+        extras = [fn(self) for fn in listify(extra_fn)]
+        df =  pd.DataFrame([np.arange(len(intrp.ds)),*attrs, *extras])
+        df = df.transpose()
+        df.columns = header
+        return df
 
 
 # %% tests
