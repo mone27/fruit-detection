@@ -51,17 +51,18 @@ class ImageTile(BaseImageTile):
     custom_bg: CustomBackground = None
     mask: ImageSegment = None
 
+def resize_img(img, scale): return img.resize((round(img.size[0] / scale), round(img.size[1] / scale)), PIL.Image.NEAREST)
         
 @lru_cache(maxsize=CACHE_MAX_SIZE)
 def open_image_cached(*args, scale=1, **kwargs) -> Image:
-    img = open_image(*args, **kwargs)
-    return img.resize((1, round(img.size[0] / scale), round(img.size[1] / scale))).refresh()
-
+    # replacing after_open, remote probability stuff can blow up here
+    kwargs['after_open'] = partial(resize_img, scale=scale)
+    return open_image(*args, **kwargs)
 
 @lru_cache(maxsize=CACHE_MAX_SIZE)
 def open_mask_cached(*args, scale=1, **kwargs) -> ImageSegment:
-    mask = open_mask(*args, **kwargs)
-    return mask.resize((1, round(mask.size[0] / scale), round(mask.size[1] / scale))).refresh()
+    kwargs['after_open'] = partial(resize_img, scale=scale)
+    return open_mask(*args, **kwargs)
 
 
 def get_image_tile(img: Image, idx, tile_sz) -> Image:
@@ -132,9 +133,21 @@ class SegmentationTileItemList(ImageList):
             img_tiled = add_custom_bg_to_tiles(imgs_tiled, custom_bgs, num_bgs, get_mask_fn)
         return SegmentationTileItemList(imgs_tiled, **kwargs)
 
+# define metrics for segmenation model
 def seg_accuracy(input, target):
     target = target.squeeze(1)
     return (input.argmax(dim=1)==target).float().mean()
+
+def iou(*args): return dice(*args, iou=True)
+
+#custom transform
+def _add_color(x, min=-.5, max=.5, channel=None):
+    """transfomr to add (or remove) a fixed amount(between -1 and 1) of a color for all pixels"""
+    if channel is None: channel = np.random.randint(0, x.shape[0] - 1)
+    amount = random.uniform(min,max)
+    x[channel] = (x[channel] + amount).clamp(0., 1.)
+    return x
+add_color = TfmPixel(_add_color)
 
 
 class SemanticSegmentationTile:
@@ -178,7 +191,7 @@ class SemanticSegmentationTile:
                      .normalize(imagenet_stats)) # needed because it use pretrained resnet on ImageNet
         print(f"created Dataset with in: {len(self.data.train_ds)} tiles train and {len(self.data.valid_ds)} in valid",
              "\ncreating learner ...")
-        self.learn = unet_learner(self.data, model, metrics=[dice, partial(dice, iou=True), seg_accuracy])
+        self.learn = unet_learner(self.data, model, metrics=[dice, iou, seg_accuracy])
         print("done")
         
 
@@ -236,96 +249,6 @@ class SemanticSegmentationTile:
     def interpet(self):
         return SegmentationTileInterpretation.from_learner(self.learn, tile_size=(self.y_tile, self.x_tile))
     
-#     def bench_valid_ds(self):
-#         res = np.empty((len(self.data.valid_ds), 2), dtype=np.dtype(object, int))
-#         for i, o in enumerate(self.data.valid_ds):
-#             pred, _, _ = self.learn.predict(o[0])
-#             score = self.iou_score(o[1], pred)
-#             res[i] = [o[0], score]
-#         return res
-    
-    
-#     def export_model_score(self, exp_file, exp_dir):
-#         exp_dir = Path(exp_dir)        
-#         run_id = random.randint(0,1000) # get unique run id
-#         exp_dir = exp_dir / run_id
-#         exp_dir.mkdir(parents=True, exist_ok=True)
-#         res = self.bench_valid_ds()
-#         paths = np.empty(res.shape[0], dtype=object)
-#         for i, el in enumerate(res):
-#             path = exp_dir / f"tile_n_{i}"
-#             i[0].save(path)
-#             paths[i] = path
-#         res[:, 0] = paths
-#         res.savetxt(exp_file)
-        
-    
-    def seg_test_image_tile(self, img: ImageTile, real_mask: ImageTile):
-        pred_mask, _, _ = inf_learn.predict(open_image_tile(img))
-        real_mask = open_image_tile(real_mask, div=True, mask=True)
-        wrong = np.count_nonzero(pred_mask.data != real_mask.data)
-        intersection = np.logical_and(real_mask.data, pred_mask.data)
-        union = np.logical_or(real_mask.data, pred_mask.data)
-        iou_score = torch.div(torch.sum(intersection), torch.sum(union).float())
-
-        return iou_score, wrong
-    
-    # warning img_size: number of pixels
-    def seg_benchmark_tile(self, path_img):
-        "benchmarks the full dataset in path_img analysing the single tiles"
-        imgs = get_image_files(path_img)
-        imgs = get_tiles(imgs, rows, cols)
-        masks = [get_labels_tiles(f) for f in imgs]
-        wrongs = torch.empty(len(imgs), dtype=torch.float32)
-        iou_scores = torch.empty(len(imgs), dtype=torch.float32)
-        for i, img, mask in zip(range(len(imgs)), imgs, masks):
-            iou_score, wrong = seg_test_image_tile(img, mask)
-            wrongs[i] = wrong
-            iou_scores[i] = iou_score
-
-        wrong_perc = torch.mean(wrongs) * 100 / imgs[0].size.prod() # should be image size
-        print(f"perc of wrong pixels: {wrong_perc}%")
-        print(f"mean accuracy: {100 - wrong_perc}%")
-        print(f"max wrong per image: {torch.max(wrongs)} over {img_size} pixels")
-        print(f"mean IoU: {torch.mean(iou_scores)}")
-        print(f"min IoU: {torch.min(iou_scores)}")
-
-    def seg_test_full_image(self, img_p: PathOrStr):
-        pred_mask = predict_mask(img_p)
-        real_mask = open_mask(get_label(img_p), div=True)
-        pred_mask, real_mask = pred_mask.data, real_mask.data
-        wrong = np.count_nonzero(pred_mask != real_mask)
-
-        intersection = np.logical_and(real_mask, pred_mask)
-        union = np.logical_or(real_mask, pred_mask)
-        iou_score = torch.div(torch.sum(intersection), torch.sum(union).float())
-
-        return iou_score, wrong
-
-    def plot_pixel_difference_tile(img, real_mask, figsize=(20, 20)):
-        img = open_image_tile(img)
-        pred_mask, _, _ = inf_learn.predict(img)
-        real_mask = open_image_tile(real_mask, mask=True, div=True)
-        real_mask = image2np(real_mask.data)
-        pred_mask = image2np(pred_mask.data)
-        img = image2np(img.data)
-        diff = pred_mask != real_mask
-        img[diff == 1] = (1, 0, 0)  # 0000FF is blue FF0000 is red
-        fig, ax = plt.subplots(figsize=figsize)
-        ax.imshow(img)
-
-    def plot_pixel_difference_full(img_p, mask_p, figsize=(20, 20)):
-        img = open_image(img_p)
-        pred_mask = predict_mask(img_p)
-        real_mask = open_mask(mask_p, div=True)
-        real_mask = image2np(real_mask.data)
-        pred_mask = image2np(pred_mask.data)
-        img = image2np(img.data)
-        diff = pred_mask != real_mask
-        #     breakpoint()
-        img[diff == 1] = (1, 0, 0)  # 0000FF is blue FF0000 is red
-        fig, ax = plt.subplots(figsize=figsize)
-        ax.imshow(img)
 
 
 class SegmentationTileInterpretation(SegmentationInterpretation):
@@ -336,14 +259,35 @@ class SegmentationTileInterpretation(SegmentationInterpretation):
     @classmethod
     def from_learner(cls, learn: Learner, tile_size, ds_type: DatasetType = DatasetType.Valid, activ: nn.Module = None):
         preds_res = learn.get_preds(ds_type=ds_type, activ=activ, with_loss=True)
-        return cls(learn, *preds_res, tile_size=tile_size)
+        return cls(learn, *preds_res, tile_size=tile_size)            
+            
+    def topk_by_metric(self, metric, k=10, largest=False):
+        metric_name = metric.__name__
+        if not hasattr(self, metric_name):
+            n = len(self.ds)
+            res = torch.empty(n)
+            prog_bar = progress_bar(range(n))
+            prog_bar.comment = f"calc metric: {metric_name}"
+            preds = self.preds
+            y_true = self.y_true
+            for i in prog_bar:
+                res[i] = metric(preds[i][None], y_true[i][None])
 
-    def plot_top_losses_pixel_diff(self, start=0, end=10, err_color=(1, 0, 0), figsize=(20, 20)):
-        tloss = self.top_losses(self.tile_size, end)
-        loss = tloss.values[start:]
-        indices = tloss.indices[start:]
-        fig, axes = plt.subplots(3, (end-start) // 3, figsize=figsize)
-        for loss, i, ax in zip(loss, indices, axes.flatten()):
+            setattr(self, metric_name, res.cpu())
+        return getattr(self, metric_name).topk(k, largest=largest)
+    
+    def plot_topk_metric_pixel_diff(self, metric, start=0, end=10, err_color=(1, 0, 0), n_rows=3, figsize=(20, 20)):
+        
+        if metric == 'loss':
+            topk = self.top_losses(self.tile_size, end)
+            mname = 'loss'
+        else:
+            topk = self.topk_by_metric(metric, end)
+            mname = metric.__name__
+        metric_vals = topk.values[start:]
+        indices = topk.indices[start:]
+        fig, axes = plt.subplots(3, (end-start) // n_rows, figsize=figsize)
+        for metric_val, i, ax in zip(metric_vals, indices, axes.flatten()):
             pred = self.pred_class[i]
             real = self.ds[i][1]
             img = self.ds[i][0]
@@ -353,7 +297,7 @@ class SegmentationTileInterpretation(SegmentationInterpretation):
             img = image2np(img.data)
             img[diff == 1] = err_color
             ax.imshow(img)
-            ax.set_title("idx: "+str(i.elem()))
+            ax.set_title(f"idx: {i}, {mname}: {metric_val}")
 
 
 # %% tests
