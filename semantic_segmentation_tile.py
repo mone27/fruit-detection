@@ -67,6 +67,13 @@ def open_mask_cached(*args, scale=1, **kwargs) -> ImageSegment:
     kwargs['after_open'] = partial(resize_img, scale=scale)
     return open_mask(*args, **kwargs)
 
+def _add_color(x, min=-.5, max=.5, channel=None):
+    """transfomr to add (or remove) a fixed amount(between -1 and 1) of a color for all pixels"""
+    if channel is None: channel = np.random.randint(0, x.shape[0] - 1)
+    amount = random.uniform(min,max)
+    x[channel] = (x[channel] + amount).clamp(0., 1.)
+    return x
+add_color = TfmPixel(_add_color)
 
 def get_image_tile(img: Image, idx, tile_sz) -> Image:
     row, col = idx
@@ -152,6 +159,33 @@ def _add_color(x, min=-.5, max=.5, channel=None):
     return x
 add_color = TfmPixel(_add_color)
 
+def best_block_divide(sz, max_blk_sz, max_tol):
+    """sz: size of the original input
+        max_blk_sz: max block size (returned block size must be <=)
+        max_tol: max number of elements left, expressed in number of elements.
+
+        finds the min number of block that satisfies this conditions
+        returns tuple of:
+        n_blocks, block_size, n_elem_left
+        """
+    blk_sz = max_blk_sz
+    # migrate to walrus operator in py 3.8
+    diff = (sz % blk_sz)
+    # try with smaller blk_size until the diff is <= max_diff
+    # edge case is blk_size=1 which means diff==0
+    while diff >= max_tol:
+        blk_sz -= 1
+        diff = (sz % blk_sz)
+    return sz // blk_sz, blk_sz, sz % blk_sz
+
+
+def calc_n_tiles(size, tile_max_size, max_tol=30):
+    """returns the \"best\" size for the tile given the image size.
+    return type is a tuple of (n_blocks, block_size, n_elem_left)"""
+    y, x = size
+    x = best_block_divide(x, tile_max_size, max_tol)
+    y = best_block_divide(y, tile_max_size, max_tol)
+    return y, x
 
 class SemanticSegmentationTile:
     """Class for all semantic segmentation"""
@@ -168,9 +202,7 @@ class SemanticSegmentationTile:
         images and masks must be all of the same size!
         """
         self.path_imgs = path_imgs
-        self.path_msks = path_masks
-
-        
+        self.path_msks = path_masks        
 
         # need to get 1 image find the size and call calc_n_tile        
         self.img_size = open_image_cached(get_files(path_imgs, None, recurse=True)[0], scale=scale).size
@@ -180,8 +212,7 @@ class SemanticSegmentationTile:
             bgs = [(bg, bg_tfms) for bg in get_files(custom_bg_dir, recurse=True)]
 
         (self.rows, self.y_tile, self.y_diff), (self.cols, self.x_tile, self.x_diff) \
-            = SemanticSegmentationTile.calc_n_tiles(self.img_size, max_tile_size, max_tol)
-        # Maybe need to use Logger instead of print
+            = calc_n_tiles(self.img_size, max_tile_size, max_tol)
         print(f"Creating Dataset of images of total size: ({self.img_size[0]}, {self.img_size[1]});"
               f"\nnumber of rows: {self.rows}, columns: {self.cols};"
               f"\nsize of tiles: ({self.y_tile}, {self.x_tile});"
@@ -207,36 +238,6 @@ class SemanticSegmentationTile:
         path, idx, tile_sz, scale, _, _ = image_tile
         path = self.get_maskp(path)
         return ImageSegmentTile(path, idx, tile_sz, scale)
-
-
-    @staticmethod
-    def best_block_divide(sz, max_blk_sz, max_tol):
-        """sz: size of the original input
-            max_blk_sz: max block size (returned block size must be <=)
-            max_tol: max number of elements left, expressed in number of elements.
-
-            finds the min number of block that satisfies this conditions
-            returns tuple of:
-            n_blocks, block_size, n_elem_left
-            """
-        blk_sz = max_blk_sz
-        # migrate to walrus operator in py 3.8
-        diff = (sz % blk_sz)
-        # try with smaller blk_size until the diff is <= max_diff
-        # edge case is blk_size=1 which means diff==0
-        while diff >= max_tol:
-            blk_sz -= 1
-            diff = (sz % blk_sz)
-        return sz // blk_sz, blk_sz, sz % blk_sz
-
-    @staticmethod
-    def calc_n_tiles(size, tile_max_size, max_tol=30):
-        """returns the \"best\" size for the tile given the image size.
-        return type is a tuple of (n_blocks, block_size, n_elem_left)"""
-        y, x = size
-        x = SemanticSegmentationTile.best_block_divide(x, tile_max_size, max_tol)
-        y = SemanticSegmentationTile.best_block_divide(y, tile_max_size, max_tol)
-        return y, x
 
     def predict_mask(self, img_path, scale=1):
         # init mask, it is set to 0 because it is bigger than the sum of all tiles
@@ -318,7 +319,28 @@ class SegmentationTileInterpretation(SegmentationInterpretation):
         df.columns = header
         return df
 
-
+class SegmentationTilePrecict:
+    def __init__(self, img_path, learn, max_tile_size=512, max_tol=30, scale=1):
+        self.img = open_image_cached(img_path, scale=scale)
+        (self.rows, self.y_tile, self.y_diff), (self.cols, self.x_tile, self.x_diff) \
+            = calc_n_tiles(self.img.size, max_tile_size, max_tol)
+        self.learn = learn
+        print(f"Image Prediction original size: ({self.img.size[0]}, {self.img.size[1]});"
+            f"\nnumber of rows: {self.rows}, columns: {self.cols};"
+            f"\nsize of tiles: ({self.y_tile}, {self.x_tile});"
+            f"\ndiscared pixels due to rounding y: {self.y_diff} x: {self.x_diff}")
+        
+    def predict_mask(self, scale=1):
+        # init mask, it is set to 0 because it is bigger than the sum of all tiles
+        mask = torch.zeros(1, self.img.size[0], self.img.size[1], dtype=torch.int64)
+        # Maybe need to use pred_batch for better performance
+        for row, col in product(range(self.rows), range(self.cols)):
+            img_tile = get_image_tile(self.img, (row, col), (self.y_tile, self.x_tile))
+            mask_tile, _, _ = self.learn.predict(img_tile)
+            mask[:, self.y_tile * row:self.y_tile * (row + 1),
+            self.x_tile * col:self.x_tile * (col + 1)] = mask_tile.data
+        return ImageSegment(mask)
+        
 # %% tests
 
 if __name__ == '__main__':
