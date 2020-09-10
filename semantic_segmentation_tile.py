@@ -67,14 +67,6 @@ def open_mask_cached(*args, scale=1, **kwargs) -> ImageSegment:
     kwargs['after_open'] = partial(resize_img, scale=scale)
     return open_mask(*args, **kwargs)
 
-def _add_color(x, min=-.5, max=.5, channel=None):
-    """transfomr to add (or remove) a fixed amount(between -1 and 1) of a color for all pixels"""
-    if channel is None: channel = np.random.randint(0, x.shape[0] - 1)
-    amount = random.uniform(min,max)
-    x[channel] = (x[channel] + amount).clamp(0., 1.)
-    return x
-add_color = TfmPixel(_add_color)
-
 def get_image_tile(img: Image, idx, tile_sz) -> Image:
     row, col = idx
     tile_y, tile_x = tile_sz
