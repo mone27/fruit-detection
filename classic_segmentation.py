@@ -7,26 +7,34 @@ import matplotlib.pyplot as plt
 OpenCvImage = np.ndarray
 
 
-# migrate to OpenCv 4.x ? (if can be installed on conda)
-
 def get_contours(image):
     """just a wrapper around cv2.findContours"""
     _, contours, _ = cv2.findContours(image, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     return contours
 
 
+def clean_image(mask, min_area=.5, max_area=50):
+    """remove (fills with black) from mask all contours that are smaller or bigger than the given area limits
+    expressed in percentage of total area"""
+    img_area = np.prod(mask.shape[:2])
+    max_area = max_area / 100 * img_area
+    min_area = min_area / 100 * img_area
+    _, contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    for contour in contours:
+        area = cv2.contourArea(contour)
+        if area < min_area or area > max_area:
+            x, y, w, h = cv2.boundingRect(contour)
+            mask = cv2.rectangle(mask, (x, y), (x + w, y + h), 0, -1)
+    return mask
+
 class ImageDivider:
     # Attention: this class uses OpenCv images notation (width, height) so means stuff need to indexed (cols, rows)
-    def __init__(self, img: OpenCvImage, mask: OpenCvImage, clean_mask=True, min_area=.5, max_area=50):
+    def __init__(self, img: OpenCvImage, mask: OpenCvImage, clean_mask=False, min_area=.5, max_area=50):
         """clean mask removes all the object that are smaller or bigger that max/min area expressed in percentage"""
         self.img = img.copy()
         self.mask = mask.copy()
-        # min and max area are in % need to adjust them to picture size
-        img_area = np.prod(self.img.shape[:2])
-        self.max_area = max_area / 100 * img_area
-        self.min_area = min_area / 100 * img_area
-
-        if clean_mask: self._clean_mask()
+        
+        if clean_mask: self.mask = clean_image(self.mask, min_area, max_area)
         self._clean_image()
         self._get_bounding_rects()
 
@@ -49,16 +57,6 @@ class ImageDivider:
             ret.append(self.img[y:y + h, x:x + w])
         return ret
 
-    def _clean_mask(self):
-        """remove from mask all part that are smaller or bigger than the given area limits"""
-        _, contours, _ = cv2.findContours(self.mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
-        for contour in contours:
-            area = cv2.contourArea(contour)
-            if area < self.min_area or area > self.max_area:
-                x, y, w, h = cv2.boundingRect(contour)
-                cv2.rectangle(self.mask, (x, y), (x + w, y + h), 0, -1)
-#                 self.mask = cv2.drawContours(self.mask, contours, 0, cv2.FILLED, cv2.FILLED)
-
     def _clean_image(self):
         self.img = self.img & self.mask[..., None]
 
@@ -70,11 +68,13 @@ def perc(a, b): return int(a * b / 100)
 class ClassicSegmentation:
     """A class for image segmentation usage:"""
 
-    def __init__(self, img: OpenCvImage, threshold=100, cut=(5, 95, 5, 95), denoise_size=3, floodfill=True):
+    def __init__(self, img: OpenCvImage, threshold=100, cut=(5, 95, 5, 95), denoise_size=3, floodfill=True, clean_mask=True, min_area=.5, max_area=50):
         self.img = img.copy()
         self.denoise_size = denoise_size
         self.threshold = threshold
         self.do_floodfill = floodfill
+        self.do_clean = clean_mask
+        self.min_area, self.max_area = min_area, max_area
         self.orig_size = self.img.shape[:2]
         w, h = self.orig_size
         self.cut = perc(w, cut[0]), perc(w, cut[1]), perc(h, cut[2]), perc(h, cut[3])
@@ -86,7 +86,7 @@ class ClassicSegmentation:
         _, self.mask = cv2.threshold(self.mask, self.threshold, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
         if self.do_floodfill: self._floodfill()
         self._denoise()
-
+        if self.do_clean: self.mask = clean_image(self.mask, self.min_area, self.max_area)
         self._add_padding()
         return self.mask
 
