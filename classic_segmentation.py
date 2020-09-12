@@ -9,7 +9,7 @@ OpenCvImage = np.ndarray
 
 def get_contours(image):
     """just a wrapper around cv2.findContours"""
-    _, contours, _ = cv2.findContours(image, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    contours, _ = cv2.findContours(image, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     return contours
 
 
@@ -19,7 +19,7 @@ def clean_image(mask, min_area=.5, max_area=50):
     img_area = np.prod(mask.shape[:2])
     max_area = max_area / 100 * img_area
     min_area = min_area / 100 * img_area
-    _, contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
     for contour in contours:
         area = cv2.contourArea(contour)
         if area < min_area or area > max_area:
@@ -38,15 +38,18 @@ class ImageDivider:
         self._clean_image()
         self._get_bounding_rects()
 
+    @classmethod
+    def from_fastai(cls, img: Image, mask: ImageSegment, **kwargs):
+        # need to convert to uint 8 and multiply by 255 to get back to opencv image representation
+        return cls(image2np(img.data * 255).astype(np.uint8), image2np(mask.data * 255).astype(np.uint8), **kwargs)
+
     def images(self) -> List[OpenCvImage]:        
         return self._get_individual_images(self.img)
         
     def masks(self) -> List[OpenCvImage]:
         return self._get_individual_images(self.mask)
 
-    @classmethod
-    def from_fastai(cls, img: Image, mask: ImageSegment):
-        return cls(image2np(img.data), image2np(mask.data.squeeze()))
+
 
     def _get_bounding_rects(self):
         self.bounding_rects = [cv2.boundingRect(contour) for contour in get_contours(self.mask)]
@@ -130,6 +133,6 @@ def classic_segmenter(img_path, **kwargs)-> List[OpenCvImage]:
 
 # %% test
 if __name__ == "__main__":
-    img = cv2.imread("dataset_segmentation/images/albicocche1.png")
-    mask = cv2.cvtColor(cv2.imread('dataset_segmentation/labels/albicocche1.png'), cv2.COLOR_BGR2GRAY)
-    print(ImageDivider(img, mask, clean_mask=False).images())
+    imgcv = cv2.imread("dataset_segmentation/images/Apricot1.png")
+    maskcv = cv2.cvtColor(cv2.imread('dataset_segmentation/labels/Apricot1.png'), cv2.COLOR_BGR2GRAY)
+    imgs = ImageDivider(imgcv, maskcv, clean_mask=False).images()

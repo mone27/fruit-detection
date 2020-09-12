@@ -54,17 +54,17 @@ class ImageTile(BaseImageTile):
     custom_bg: CustomBackground = None
     mask: ImageSegment = None
 
-def resize_img(img, scale): return img.resize((round(img.size[0] / scale), round(img.size[1] / scale)), PIL.Image.NEAREST)
+def scale_img(img, scale): return img.resize((round(img.size[0] / scale), round(img.size[1] / scale)))
         
 @lru_cache(maxsize=CACHE_MAX_SIZE)
 def open_image_cached(*args, scale=1, **kwargs) -> Image:
     # replacing after_open, remote possibility stuff can blow up here
-    kwargs['after_open'] = partial(resize_img, scale=scale)
+    kwargs['after_open'] = partial(scale_img, scale=scale)
     return open_image(*args, **kwargs)
 
 @lru_cache(maxsize=CACHE_MAX_SIZE)
 def open_mask_cached(*args, scale=1, **kwargs) -> ImageSegment:
-    kwargs['after_open'] = partial(resize_img, scale=scale)
+    kwargs['after_open'] = partial(scale_img, scale=scale)
     return open_mask(*args, **kwargs)
 
 def get_image_tile(img: Image, idx, tile_sz) -> Image:
@@ -188,7 +188,7 @@ class SemanticSegmentationTile:
         return getattr(self.learn, attr, None)
 
     def __init__(self, path_imgs: Path, path_masks: Path, max_tile_size=512, bs=16, max_tol=30,
-                 transforms=get_transforms(), model=models.resnet34, scale=1, valid_split=.8, custom_bg_dir=None,
+                 transforms=get_transforms(), model=models.resnet18, scale=1, valid_split=.8, custom_bg_dir=None,
                  num_bgs=3, bg_tfms=[]):
         """
         images and masks must be all of the same size!
@@ -311,7 +311,8 @@ class SegmentationTileInterpretation(SegmentationInterpretation):
         df.columns = header
         return df
 
-class SegmentationTilePrecict:
+class SegmentationTilePrecict_Old:
+    """"old class that predicts only one image and requires to pass a learn object"""
     def __init__(self, img_path, learn, max_tile_size=512, max_tol=30, scale=1):
         self.img = open_image_cached(img_path, scale=scale)
         (self.rows, self.y_tile, self.y_diff), (self.cols, self.x_tile, self.x_diff) \
@@ -321,7 +322,7 @@ class SegmentationTilePrecict:
             f"\nnumber of rows: {self.rows}, columns: {self.cols};"
             f"\nsize of tiles: ({self.y_tile}, {self.x_tile});"
             f"\ndiscared pixels due to rounding y: {self.y_diff} x: {self.x_diff}")
-        
+
     def predict_mask(self, scale=1):
         # init mask, it is set to 0 because it is bigger than the sum of all tiles
         mask = torch.zeros(1, self.img.size[0], self.img.size[1], dtype=torch.int64)
@@ -332,6 +333,29 @@ class SegmentationTilePrecict:
             mask[:, self.y_tile * row:self.y_tile * (row + 1),
             self.x_tile * col:self.x_tile * (col + 1)] = mask_tile.data
         return ImageSegment(mask)
+
+
+class SegmentationTilePredictor:
+    def __init__(self, learner_path, learner_file, tile_size, scale=3):
+        self.learn = load_learner(learner_path,learner_file)
+        self.scale = scale
+        self.tile_size = tile_size
+    def predict_mask(self, img_path):
+        img = open_image_cached(img_path, scale=self.scale)
+        rows = img.shape[1] // self.tile_size[0]
+        cols = img.shape[2] // self.tile_size[1]
+
+        # init mask, it is set to 0 because it is bigger than the sum of all tiles
+        mask = torch.zeros(1, img.size[0], img.size[1], dtype=torch.int64)
+        # Maybe need to use pred_batch for better performance
+        for row, col in product(range(rows), range(cols)):
+            img_tile = get_image_tile(img, (row, col), self.tile_size)
+            mask_tile, _, _ = self.learn.predict(img_tile)
+            mask[:, self.tile_size[0] * row : self.tile_size[0] * (row + 1),
+            self.tile_size[1] * col : self.tile_size[1] * (col + 1)] = mask_tile.data
+        return ImageSegment(mask), img
+
+
         
 # %% tests
 
